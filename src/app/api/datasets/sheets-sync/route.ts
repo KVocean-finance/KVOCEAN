@@ -5,6 +5,7 @@ import { getAllowedUser } from "@/lib/supabase/access";
 import { loadDatasets } from "@/lib/datasets";
 import { buildCompanyReport, type ReportingModel, type SavedQuarterSnapshot } from "@/lib/validation/report";
 import { getSheetsConfig, getSheetsEnvDiagnostics, type SheetsConfig } from "@/lib/google-sheets";
+import { deserializeSharedConfig } from "@/lib/shared-state";
 import {
   buildHeaderRow,
   buildQuarterRows,
@@ -106,10 +107,20 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, error: "동기화할 회사 데이터가 없습니다." }, { status: 404 });
     }
 
-    // Build per-company reports.
+    // Use the currently active classification (from app_config) so the sheet
+    // matches what users see on screen, not the classification frozen into
+    // each snapshot at save time.
+    const { data: configRow } = await supabase
+      .from("app_config")
+      .select("logic_config, company_configs, classification_catalog")
+      .eq("id", "global")
+      .maybeSingle();
+    const activeClassificationGroups = deserializeSharedConfig(configRow).classificationGroups;
+
+    // Build per-company reports with the active classification.
     const companyReports = new Map<string, ReportingModel>();
     for (const [companyName, snapshots] of byCompany.entries()) {
-      companyReports.set(companyName, buildCompanyReport(snapshots));
+      companyReports.set(companyName, buildCompanyReport(snapshots, activeClassificationGroups));
     }
 
     // Distinct quarters across all companies.
