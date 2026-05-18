@@ -310,15 +310,14 @@ export function applySign(value: number | null | undefined, signCode: SignCode |
   return signCode === 1 ? -numeric : numeric;
 }
 
-export function inferSignFromName(name: string, _logicConfig: LogicConfig, _sectionName?: string): SignCode | null {
+export function inferSignFromName(name: string, _logicConfig: LogicConfig, sectionName?: string): SignCode | null {
   // Single source of truth: the seed catalog (분류DB).
-  // Returns null when the account isn't in the seed — caller treats null as
-  // "user must classify this" and the row falls into the 미분류 bucket.
-  const seedEntry = findEntryByAlias(name);
+  // sectionName is forwarded so ambiguous aliases (same name in 자본 vs 영업외비용 etc.)
+  // resolve to the correct entry based on the OCR row's parent section.
+  const seedEntry = findEntryByAlias(name, sectionName);
   if (seedEntry) {
     return seedEntry.sign as SignCode;
   }
-  // Explicit _양수/_음수 suffix still respected — these are legacy migration tags.
   if (name.includes("_양수") || name.endsWith("양수")) return 0;
   if (name.includes("_음수") || name.endsWith("음수")) return 1;
   return null;

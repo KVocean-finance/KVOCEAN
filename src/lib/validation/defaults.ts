@@ -9,15 +9,24 @@ function normalizeLookupKey(value: string): string {
   return value.replace(/\s+/g, "").toLowerCase();
 }
 
-const SEED_ALIAS_LOOKUP: Map<string, ClassificationEntry> = (() => {
-  const map = new Map<string, ClassificationEntry>();
-  for (const entry of CLASSIFICATION_ENTRIES) {
-    const key = normalizeLookupKey(entry.세분류);
-    if (key && !map.has(key)) map.set(key, entry);
-    for (const alias of entry.aliases) {
-      const aliasKey = normalizeLookupKey(alias);
-      if (aliasKey && !map.has(aliasKey)) map.set(aliasKey, entry);
+// Some aliases appear in multiple seed entries (e.g. "전기오류수정손실" lives in both
+// 자본 (3051000, −) and 영업외비용 (5082000, +)). Index every candidate so we can
+// disambiguate at lookup time using the OCR section the row belongs to.
+const SEED_ALIAS_LOOKUP: Map<string, ClassificationEntry[]> = (() => {
+  const map = new Map<string, ClassificationEntry[]>();
+  const push = (rawKey: string, entry: ClassificationEntry) => {
+    const key = normalizeLookupKey(rawKey);
+    if (!key) return;
+    const list = map.get(key);
+    if (list) {
+      if (!list.includes(entry)) list.push(entry);
+    } else {
+      map.set(key, [entry]);
     }
+  };
+  for (const entry of CLASSIFICATION_ENTRIES) {
+    push(entry.세분류, entry);
+    for (const alias of entry.aliases) push(alias, entry);
   }
   return map;
 })();
@@ -30,9 +39,29 @@ const SEED_CODE_LOOKUP: Map<number, ClassificationEntry> = (() => {
   return map;
 })();
 
-export function findEntryByAlias(alias: string): ClassificationEntry | null {
+/**
+ * Find the seed entry that an OCR row's account name maps into.
+ * When sectionHint is provided (the OCR row's parent section, e.g. "영업외비용"),
+ * candidates whose 중분류/대분류 match the hint win. This is how we keep ambiguous
+ * names like "전기오류수정손실" (자본 vs 영업외비용) from landing on the wrong sign.
+ */
+export function findEntryByAlias(alias: string, sectionHint?: string): ClassificationEntry | null {
   if (!alias) return null;
-  return SEED_ALIAS_LOOKUP.get(normalizeLookupKey(alias)) ?? null;
+  const candidates = SEED_ALIAS_LOOKUP.get(normalizeLookupKey(alias));
+  if (!candidates || candidates.length === 0) return null;
+  if (candidates.length === 1 || !sectionHint) return candidates[0];
+
+  const hint = normalizeLookupKey(sectionHint);
+  if (!hint) return candidates[0];
+
+  // Prefer entries whose 중분류 / 대분류 / 소분류 matches the OCR section.
+  const byMiddle = candidates.find((c) => normalizeLookupKey(c.중분류) === hint);
+  if (byMiddle) return byMiddle;
+  const byMajor = candidates.find((c) => normalizeLookupKey(c.대분류) === hint);
+  if (byMajor) return byMajor;
+  const bySmall = candidates.find((c) => normalizeLookupKey(c.소분류) === hint);
+  if (bySmall) return bySmall;
+  return candidates[0];
 }
 
 export function findEntryByCode(code: number): ClassificationEntry | null {

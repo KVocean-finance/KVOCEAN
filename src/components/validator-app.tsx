@@ -699,7 +699,7 @@ function buildClassificationTree(
   const unclassifiedAccounts: SectionAccountDbEntry[] = [];
 
   for (const acct of accountEntries) {
-    const matched = findEntryByAlias(acct.accountName);
+    const matched = findEntryByAlias(acct.accountName, acct.sectionKey || acct.section);
     if (matched) {
       // Find which alias matched (case-insensitive)
       const target = normalizeAliasKey(acct.accountName);
