@@ -2076,6 +2076,8 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   const [classificationHistory, setClassificationHistory] = useState<ClassificationCatalogGroup[][]>([]);
   const [configRulesHistory, setConfigRulesHistory] = useState<ConfigRulesSnapshot[]>([]);
   const configRulesSnapshotPendingRef = useRef(false);
+  const classificationSyncOnceRef = useRef(false);
+  const [classificationSyncMessage, setClassificationSyncMessage] = useState<string | null>(null);
   const [resultOpenState, setResultOpenState] = useState<Record<string, boolean>>({});
   const [savedDatasets, setSavedDatasets] = useState<SavedQuarterSnapshot[]>(initialDatasets ?? []);
   const [consistencyResults, setConsistencyResults] = useState<Array<{
@@ -2348,6 +2350,19 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
 
     return () => window.clearTimeout(timeout);
   }, [mounted, sharedStateReady, workspaceMemo]);
+
+  // After initial Supabase load, re-sync stored datasets against the current
+  // 분류DB once. Catches the case where code/seed/normalization has changed
+  // since the dataset was saved — without it the user would have to click
+  // through and re-save every snapshot manually.
+  useEffect(() => {
+    if (!mounted || !sharedStateReady) return;
+    if (classificationSyncOnceRef.current) return;
+    if (!savedDatasets.length) return;
+    classificationSyncOnceRef.current = true;
+    void syncStoredDatasetsToClassificationDB();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounted, sharedStateReady, savedDatasets.length]);
 
   useEffect(() => {
     const company = selectedCompany.trim();
@@ -3391,6 +3406,70 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     if (showFeedback) {
       setClassificationSaveState("saved");
       window.setTimeout(() => setClassificationSaveState("idle"), 1800);
+      // Explicit save → also re-sync stored datasets so their signs follow
+      // the new 분류DB without the user having to re-open and re-save each one.
+      void syncStoredDatasetsToClassificationDB(clonedCatalog, nextGroups);
+    }
+  }
+
+  /**
+   * Re-build every saved dataset's statement rows against the current 분류DB
+   * and push only the ones whose signs actually changed back to Supabase.
+   * No-op when nothing changes.
+   *
+   * Pass freshly-applied catalog/groups (not React state) when calling from
+   * applyClassificationCatalog — setState hasn't propagated yet at that point.
+   */
+  async function syncStoredDatasetsToClassificationDB(
+    catalogOverride?: ClassificationCatalogGroup[],
+    groupsOverride?: ClassificationGroups
+  ) {
+    if (!savedDatasets.length) return;
+    const effectiveCatalog = catalogOverride ?? classificationCatalog;
+    const effectiveGroups = groupsOverride ?? classificationGroups;
+    const changedSnapshots: SavedQuarterSnapshot[] = [];
+
+    for (const dataset of savedDatasets) {
+      const fresh = buildQuarterSnapshots({
+        pastedText: dataset.source.pastedText,
+        selectedCompany: dataset.companyName,
+        tolerance: dataset.source.tolerance ?? 0,
+        logicConfig,
+        companyConfigs,
+        classificationGroups: effectiveGroups,
+        classificationCatalog: effectiveCatalog,
+        pasteEdits: dataset.source.pasteEdits ?? {},
+        nameEdits: dataset.source.nameEdits ?? {},
+        sessionSignFixes: {},
+        statementType: dataset.source.statementType
+      });
+      const matched = fresh.find((s) => s.id === dataset.id);
+      if (!matched) continue;
+      const changed =
+        matched.adjustedStatementRows.length !== dataset.adjustedStatementRows.length
+        || matched.adjustedStatementRows.some((newRow, idx) => {
+          const oldRow = dataset.adjustedStatementRows[idx];
+          return !oldRow || oldRow.signFlag !== newRow.signFlag;
+        });
+      if (changed) changedSnapshots.push(matched);
+    }
+
+    if (!changedSnapshots.length) return;
+
+    try {
+      const response = await fetch("/api/datasets", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ snapshots: changedSnapshots, validatedText: "" })
+      });
+      if (!response.ok) return;
+      const payload = parseDatasetApiResponse(await response.json() as DatasetApiResponse);
+      setSavedDatasets(payload.datasets);
+      setTrashedDatasets(payload.trashedDatasets);
+      setClassificationSyncMessage(`분류DB 기준으로 ${changedSnapshots.length}개 저장 데이터를 자동 갱신했습니다.`);
+      window.setTimeout(() => setClassificationSyncMessage(null), 5000);
+    } catch {
+      // Best-effort — leave stored data alone if sync fails, surface nothing.
     }
   }
 
@@ -3710,6 +3789,25 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     );
   }
 
+  // Block the full app until Supabase has handed us the shared catalog +
+  // saved datasets — otherwise the user briefly sees an empty/half-built
+  // workspace before things pop in.
+  if (!mounted || !sharedStateReady) {
+    return (
+      <main className="workspace-shell" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "60vh" }}>
+        <div style={{ textAlign: "center", maxWidth: 480, padding: 24 }}>
+          <span className="hero-eyebrow">KVOCEAN OCR Validator</span>
+          <h1 style={{ marginTop: 8, marginBottom: 16 }}>불러오는 중...</h1>
+          <p className="muted">
+            {sharedStateError
+              ? sharedStateError
+              : "공용 Supabase 저장소에서 분류DB와 저장 데이터를 가져오고 있습니다. 잠시만 기다려 주세요."}
+          </p>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="workspace-shell">
       <aside className="panel memo-sidebar workspace-memo-rail">
@@ -3747,6 +3845,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
           <span className="pill">3. 값/부호 바로 수정</span>
         </div>
         {sharedStateError ? <p className="save-feedback warning">{sharedStateError}</p> : null}
+        {classificationSyncMessage ? <p className="save-feedback">{classificationSyncMessage}</p> : null}
       </section>
 
       <section className="summary-strip">
