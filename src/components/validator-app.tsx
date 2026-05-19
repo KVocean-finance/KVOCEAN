@@ -693,7 +693,7 @@ const UNCLASSIFIED_LABEL = "미분류";
 // Bump the version suffix whenever a deploy needs every browser to re-run
 // the sync once (e.g. when legacy source.* fields stop being written and
 // we want existing rows in Supabase to lose them on the next PUT).
-const CATALOG_SYNC_LS_KEY = "kvocean.lastSyncedCatalogSignature.v3";
+const CATALOG_SYNC_LS_KEY = "kvocean.lastSyncedCatalogSignature.v4";
 
 /**
  * Compact fingerprint of the sign-deciding fields of every catalog group.
@@ -2475,16 +2475,30 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     // unresponsive on first load.
     const timeout = window.setTimeout(async () => {
       if (forceAll) {
-        // Reset the catalog itself to the code-side seed so any stale
-        // edits stored in Supabase get overwritten on the next config PUT.
+        // Wipe every stored override that influences sign decisions back to
+        // the code-side defaults: classification catalog, logicConfig
+        // (sectionSignOverrides etc.), and per-company configs. Whatever was
+        // sitting in Supabase from old code paths is replaced. The existing
+        // 700ms shared-state PUT effect picks the state changes up and
+        // mirrors them into Supabase.
         const defaultCatalog = cloneClassificationCatalog(DEFAULT_CLASSIFICATION_CATALOG);
         const defaultGroups = classificationCatalogToGroups(defaultCatalog);
+        const defaultLogic = cloneLogicConfig(DEFAULT_LOGIC_CONFIG);
+        const defaultCompanies: CompanyConfigs = structuredClone(DEFAULT_COMPANY_CONFIGS);
         setClassificationCatalog(defaultCatalog);
         setClassificationGroups(defaultGroups);
+        setLogicConfig(defaultLogic);
+        setCompanyConfigs(defaultCompanies);
         // Pass the fresh values into sync directly — React state hasn't
         // propagated yet, so reading from state here would still see the
-        // pre-reset catalog.
-        await syncStoredDatasetsToClassificationDB(defaultCatalog, defaultGroups, true);
+        // pre-reset values.
+        await syncStoredDatasetsToClassificationDB(
+          defaultCatalog,
+          defaultGroups,
+          true,
+          defaultLogic,
+          defaultCompanies
+        );
         // Recompute the signature against the catalog we just wrote so the
         // next boot's compare doesn't re-trigger.
         try {
@@ -3571,11 +3585,15 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   async function syncStoredDatasetsToClassificationDB(
     catalogOverride?: ClassificationCatalogGroup[],
     groupsOverride?: ClassificationGroups,
-    forceAll: boolean = false
+    forceAll: boolean = false,
+    logicConfigOverride?: LogicConfig,
+    companyConfigsOverride?: CompanyConfigs
   ) {
     if (!savedDatasets.length) return;
     const effectiveCatalog = catalogOverride ?? classificationCatalog;
     const effectiveGroups = groupsOverride ?? classificationGroups;
+    const effectiveLogicConfig = logicConfigOverride ?? logicConfig;
+    const effectiveCompanyConfigs = companyConfigsOverride ?? companyConfigs;
     const total = savedDatasets.length;
     const changedSnapshots: SavedQuarterSnapshot[] = [];
     const yieldToMain = () => new Promise<void>((resolve) => window.setTimeout(resolve, 0));
@@ -3590,8 +3608,8 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
           pastedText: dataset.source.pastedText,
           selectedCompany: dataset.companyName,
           tolerance: dataset.source.tolerance ?? 0,
-          logicConfig,
-          companyConfigs,
+          logicConfig: effectiveLogicConfig,
+          companyConfigs: effectiveCompanyConfigs,
           classificationGroups: effectiveGroups,
           classificationCatalog: effectiveCatalog,
           pasteEdits: dataset.source.pasteEdits ?? {},
