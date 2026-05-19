@@ -359,12 +359,14 @@ export function inferSignFromName(
 }
 
 /**
- * Resolve sign with explicit "matched" signal — wraps inferSignFromName and
- * adds a keyword-based safety net for accounts that don't appear in the
- * catalog/seed at all (so they don't silently default to +).
+ * Resolve sign with explicit "matched" signal.
  *
- * Returned `matched=false` means the validation engine should surface this
- * row as "미매칭" to the user — the sign was guessed, not looked up.
+ * Strict policy: the sign is decided exclusively from the classification DB
+ * (live catalog + seed — both of which the user sees in 4. 분류DB). No
+ * keyword-based guessing, because anything decided invisibly in code is
+ * something the user can't fix from the DB. If the lookup misses, we
+ * surface `matched=false` so the row is flagged "미매칭" — the user then
+ * classifies it in 분류DB once and the next run picks it up automatically.
  */
 export function resolveSign(
   name: string,
@@ -374,12 +376,6 @@ export function resolveSign(
 ): { sign: SignCode; matched: boolean } {
   const direct = inferSignFromName(name, logicConfig, sectionName, catalogLookup);
   if (direct !== null) return { sign: direct, matched: true };
-
-  const plusHit = (logicConfig.plusOverrideKeywords ?? []).some((kw) => kw && name.includes(kw));
-  if (!plusHit) {
-    const minusHit = (logicConfig.minusKeywords ?? []).some((kw) => kw && name.includes(kw));
-    if (minusHit) return { sign: 1, matched: false };
-  }
   return { sign: 0, matched: false };
 }
 

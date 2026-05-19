@@ -985,15 +985,18 @@ function buildClassificationTableRows(
     };
   }
 
-  // 미분류 — OCR 항목 중 매칭 안 된 것
+  // 미분류 — OCR 항목 중 매칭 안 된 것.
+  // Pre-fill 대/중분류 from the OCR section so the user only has to pick
+  // 소/세분류 + 부호 in the editor (e.g. OCR section "유동자산" → 자산/유동자산).
   for (const acct of accountEntries) {
     const aliasKey = normalizeAliasKey(acct.accountName);
     if (matchedAliasKeys.has(aliasKey)) continue;
+    const { 대분류, 중분류 } = inferUnclassifiedHierarchy(acct.sectionKey || acct.section);
     rows.push({
       rowKey: `unclassified::${acct.entryKey}`,
       code: UNCLASSIFIED_ROW_CODE,
-      대분류: "",
-      중분류: "",
+      대분류,
+      중분류,
       소분류: "",
       세분류: "",
       항목명: acct.accountName,
@@ -1005,6 +1008,23 @@ function buildClassificationTableRows(
   }
 
   return rows;
+}
+
+/**
+ * Map an OCR section label (e.g. "유동자산", "영업외비용") to the seed's
+ * 대분류/중분류 so an unclassified row already shows where it came from.
+ * Looks up the first seed entry whose 중분류 (then 대분류) matches.
+ */
+function inferUnclassifiedHierarchy(sectionLabel: string): { 대분류: string; 중분류: string } {
+  const trimmed = (sectionLabel ?? "").trim();
+  // "기타" is an ACCOUNT_DB_SECTIONS catch-all bucket, not a real OCR section —
+  // skip it so we don't accidentally inherit 자본/기타 from a seed match.
+  if (!trimmed || trimmed === "기타") return { 대분류: "", 중분류: "" };
+  const byMiddle = CLASSIFICATION_ENTRIES.find((e) => e.중분류 === trimmed);
+  if (byMiddle) return { 대분류: byMiddle.대분류, 중분류: byMiddle.중분류 };
+  const byMajor = CLASSIFICATION_ENTRIES.find((e) => e.대분류 === trimmed);
+  if (byMajor) return { 대분류: byMajor.대분류, 중분류: byMajor.중분류 };
+  return { 대분류: "", 중분류: "" };
 }
 
 function formatRowSources(sources: ClassificationTableRow["sources"]): string {
@@ -2458,13 +2478,14 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
         logicConfig,
         companyConfigs,
         classificationGroups,
+        classificationCatalog,
         pasteEdits,
         nameEdits,
         sessionSignFixes
       };
       return buildReportingModel(reportArgs);
     },
-    [pastedText, selectedCompany, tolerance, logicConfig, companyConfigs, classificationGroups, pasteEdits, nameEdits, sessionSignFixes]
+    [pastedText, selectedCompany, tolerance, logicConfig, companyConfigs, classificationGroups, classificationCatalog, pasteEdits, nameEdits, sessionSignFixes]
   );
   const accountDictionarySectionGroups = useMemo(
     () => {
@@ -2649,6 +2670,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       logicConfig,
       companyConfigs,
       classificationGroups,
+      classificationCatalog,
       pasteEdits,
       nameEdits,
       sessionSignFixes
@@ -2657,7 +2679,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     if (JSON.stringify(normalizedPasteEdits) !== JSON.stringify(pasteEdits)) {
       setPasteEdits(normalizedPasteEdits);
     }
-  }, [pastedText, selectedCompany, logicConfig, companyConfigs, classificationGroups, pasteEdits, nameEdits, sessionSignFixes]);
+  }, [pastedText, selectedCompany, logicConfig, companyConfigs, classificationGroups, classificationCatalog, pasteEdits, nameEdits, sessionSignFixes]);
 
   function resetAdjustments() {
     setPasteEdits({});
@@ -2677,6 +2699,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       logicConfig,
       companyConfigs,
       classificationGroups,
+      classificationCatalog,
       pasteEdits,
       nameEdits,
       sessionSignFixes,
@@ -2832,6 +2855,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       logicConfig: dataset.source.logicConfig,
       companyConfigs: dataset.source.companyConfigs,
       classificationGroups: dataset.source.classificationGroups,
+      classificationCatalog,
       pasteEdits: dataset.source.pasteEdits,
       nameEdits: dataset.source.nameEdits ?? {},
       sessionSignFixes: cloneSessionSignFixes(dataset.source.sessionSignFixes)
@@ -3314,6 +3338,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       logicConfig,
       companyConfigs,
       classificationGroups,
+      classificationCatalog,
       pasteEdits: prev,
       nameEdits,
       sessionSignFixes: nextSessionSignFixes

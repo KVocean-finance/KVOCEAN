@@ -1,5 +1,5 @@
-import { DEFAULT_CLASSIFICATION_GROUPS, LOSS_ACCOUNTS, MANAGED_CLASSIFICATION_KEY_SET, type ClassificationGroups, type CompanyConfigs, type LogicConfig, type SignCode } from "./defaults";
-import { applySign, detectCompanyFromPaste, formatNumber, inferSignFromName, parsePastedText, pasteEditKey, resolveEditedNameRow, safeFloat, type SessionSignFixes } from "./engine";
+import { buildCatalogAliasLookup, DEFAULT_CLASSIFICATION_GROUPS, LOSS_ACCOUNTS, MANAGED_CLASSIFICATION_KEY_SET, type CatalogAliasMatch, type ClassificationCatalogGroup, type ClassificationGroups, type CompanyConfigs, type LogicConfig, type SignCode } from "./defaults";
+import { applySign, detectCompanyFromPaste, formatNumber, parsePastedText, pasteEditKey, resolveEditedNameRow, resolveSign, safeFloat, type SessionSignFixes } from "./engine";
 
 export type ReportPeriod = {
   key: string;
@@ -385,7 +385,8 @@ function resolveRowMeta(
   companyConfigs: CompanyConfigs,
   classificationGroups: ClassificationGroups,
   companyName: string | null,
-  sessionSignFixes: SessionSignFixes
+  sessionSignFixes: SessionSignFixes,
+  catalogLookup?: Map<string, CatalogAliasMatch[]>
 ) {
   const overrides = getEffectiveOverrides(logicConfig, companyConfigs, companyName);
   let prevSect = "";
@@ -398,7 +399,10 @@ function resolveRowMeta(
 
     const section = prevSect || "기타";
     const sectionKey = normalizeSectionKey(section);
-    let signCode = inferSignFromName(accountName, logicConfig, section) ?? 0;
+    // Use resolveSign so live catalog + minus-keyword safety net both apply
+    // here too — otherwise the reporting path would silently default to + for
+    // any unmatched account, even though the validator panel handles it now.
+    let signCode = resolveSign(accountName, logicConfig, section, catalogLookup).sign;
     if (LOSS_ACCOUNTS.has(accountName.trim())) {
       signCode = 1;
     }
@@ -465,6 +469,7 @@ export function normalizePasteEditsForValidation(args: {
   logicConfig: LogicConfig;
   companyConfigs: CompanyConfigs;
   classificationGroups: ClassificationGroups;
+  classificationCatalog?: ClassificationCatalogGroup[];
   pasteEdits: Record<string, number>;
   nameEdits: Record<string, string>;
   sessionSignFixes: SessionSignFixes;
@@ -477,7 +482,8 @@ export function normalizePasteEditsForValidation(args: {
   const companyName = args.selectedCompany?.trim() || detectCompanyFromPaste(args.pastedText) || null;
   const periods = buildPeriods(parsed.nameRow, parsed.dataRows);
   const effectiveNameRow = resolveEditedNameRow(parsed.nameRow, args.nameEdits);
-  const metaRows = resolveRowMeta(parsed.catRow, effectiveNameRow, args.logicConfig, args.companyConfigs, args.classificationGroups, companyName, args.sessionSignFixes);
+  const catalogLookup = args.classificationCatalog ? buildCatalogAliasLookup(args.classificationCatalog) : undefined;
+  const metaRows = resolveRowMeta(parsed.catRow, effectiveNameRow, args.logicConfig, args.companyConfigs, args.classificationGroups, companyName, args.sessionSignFixes, catalogLookup);
   const nextPasteEdits = { ...args.pasteEdits };
 
   metaRows.forEach((meta) => {
@@ -1760,6 +1766,7 @@ export function buildReportingModel(args: {
   logicConfig: LogicConfig;
   companyConfigs: CompanyConfigs;
   classificationGroups: ClassificationGroups;
+  classificationCatalog?: ClassificationCatalogGroup[];
   pasteEdits: Record<string, number>;
   nameEdits: Record<string, string>;
   sessionSignFixes: SessionSignFixes;
@@ -1781,7 +1788,8 @@ export function buildReportingModel(args: {
   const companyName = args.selectedCompany?.trim() || detectedCompany || null;
   const periods = buildPeriods(parsed.nameRow, parsed.dataRows);
   const effectiveNameRow = resolveEditedNameRow(parsed.nameRow, args.nameEdits);
-  const metaRows = resolveRowMeta(parsed.catRow, effectiveNameRow, args.logicConfig, args.companyConfigs, args.classificationGroups, companyName, args.sessionSignFixes);
+  const catalogLookup = args.classificationCatalog ? buildCatalogAliasLookup(args.classificationCatalog) : undefined;
+  const metaRows = resolveRowMeta(parsed.catRow, effectiveNameRow, args.logicConfig, args.companyConfigs, args.classificationGroups, companyName, args.sessionSignFixes, catalogLookup);
   const normalizedPasteEdits = normalizePasteEditsForValidation(args);
   const rawStatementRows = buildStatementRows(metaRows, periods, parsed.dataRows, normalizedPasteEdits, false);
   const adjustedStatementRows = buildStatementRows(metaRows, periods, parsed.dataRows, normalizedPasteEdits, true);
@@ -1811,6 +1819,7 @@ export function buildQuarterSnapshots(args: {
   logicConfig: LogicConfig;
   companyConfigs: CompanyConfigs;
   classificationGroups: ClassificationGroups;
+  classificationCatalog?: ClassificationCatalogGroup[];
   pasteEdits: Record<string, number>;
   nameEdits: Record<string, string>;
   sessionSignFixes: SessionSignFixes;
