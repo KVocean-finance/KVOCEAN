@@ -2257,6 +2257,12 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   const [pasteSectionRows, setPasteSectionRows] = useState<MapRow[]>(objectEntriesToRows(DEFAULT_LOGIC_CONFIG.pasteSectToParent));
   const [capitalRuleRows, setCapitalRuleRows] = useState<CapitalRuleRow[]>(capitalRulesToRows(DEFAULT_LOGIC_CONFIG.capitalL1Signs, DEFAULT_LOGIC_CONFIG.capitalL1Parent));
   const [capitalMemoRows, setCapitalMemoRows] = useState<CapitalMemoRow[]>(capitalMemoAccountsToRows(DEFAULT_LOGIC_CONFIG.capitalMemoAccounts));
+  const [parentAliasRows, setParentAliasRows] = useState<Array<{ parent: string; aliases: string }>>(
+    () => Object.entries(DEFAULT_LOGIC_CONFIG.parentAliases ?? {}).map(([parent, aliases]) => ({
+      parent,
+      aliases: aliases.filter((a) => a !== parent).join(", ")
+    }))
+  );
   const [classificationHistory, setClassificationHistory] = useState<ClassificationCatalogGroup[][]>([]);
   const [configRulesHistory, setConfigRulesHistory] = useState<ConfigRulesSnapshot[]>([]);
   const configRulesSnapshotPendingRef = useRef(false);
@@ -3970,13 +3976,25 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   function saveConfigEditors() {
     pushConfigRulesSnapshot();
     setConfigApplyState("applying");
+    const nextParentAliases: Record<string, string[]> = {};
+    for (const row of parentAliasRows) {
+      const parent = row.parent.trim();
+      if (!parent) continue;
+      const aliases = row.aliases
+        .split(",")
+        .map((a) => a.trim())
+        .filter(Boolean);
+      // 부모 본인 이름은 항상 포함
+      nextParentAliases[parent] = Array.from(new Set([parent, ...aliases]));
+    }
     setLogicConfig((prev) => ({
       ...prev,
       capitalL1Signs: rowsToCapitalSigns(capitalRuleRows),
       capitalL1Parent: rowsToCapitalParents(capitalRuleRows),
       capitalMemoAccounts: rowsToCapitalMemoAccounts(capitalMemoRows),
       pasteSectToParent: rowsToMap(pasteSectionRows),
-      sectionSignOverrides: rowsToOverrides(globalOverrideRows)
+      sectionSignOverrides: rowsToOverrides(globalOverrideRows),
+      parentAliases: nextParentAliases
     }));
 
     const company = selectedCompany.trim();
@@ -4969,6 +4987,45 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
                   </div>
                 </section>
               </div>
+
+              <section className="config-card">
+                <h3>부모 항목 별칭</h3>
+                <p className="muted" style={{ marginTop: 0 }}>
+                  검증 합산 규칙(자산 = 부채 + 자본 등)에서 paste의 부모 항목을 인식할 때 쓰는 다른 이름들. 예: paste에 &quot;자본총계&quot;라 적혀있어도 &quot;자본&quot;으로 인식하려면 별칭에 추가. 자기 이름은 자동으로 포함되니 다른 이름만 쉼표로 구분해 적으세요.
+                </p>
+                <div className="list-editor">
+                  {parentAliasRows.map((row, index) => (
+                    <div className="map-row" key={`parent-alias-${index}`}>
+                      <input
+                        className="input"
+                        value={row.parent}
+                        placeholder="부모 항목명 (예: 자본)"
+                        onChange={(event) => {
+                          pushConfigRulesSnapshot();
+                          setParentAliasRows((prev) => prev.map((item, itemIndex) => itemIndex === index ? { ...item, parent: event.target.value } : item));
+                        }}
+                      />
+                      <input
+                        className="input"
+                        value={row.aliases}
+                        placeholder="다른 이름 (예: 자본총계, 총자본)"
+                        onChange={(event) => {
+                          pushConfigRulesSnapshot();
+                          setParentAliasRows((prev) => prev.map((item, itemIndex) => itemIndex === index ? { ...item, aliases: event.target.value } : item));
+                        }}
+                      />
+                      <button className="danger-button" onClick={() => {
+                        pushConfigRulesSnapshot();
+                        setParentAliasRows((prev) => prev.filter((_, itemIndex) => itemIndex !== index));
+                      }}>삭제</button>
+                    </div>
+                  ))}
+                  <button className="ghost-button" onClick={() => {
+                    pushConfigRulesSnapshot();
+                    setParentAliasRows((prev) => [...prev, { parent: "", aliases: "" }]);
+                  }}>부모 별칭 추가</button>
+                </div>
+              </section>
 
               <section className="config-card">
                 <h3>현재 설정 JSON</h3>
