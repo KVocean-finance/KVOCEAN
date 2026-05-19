@@ -337,6 +337,13 @@ export function inferSignFromName(
   sectionName?: string,
   catalogLookup?: Map<string, CatalogAliasMatch[]>
 ): SignCode | null {
+  // 시드(분류DB 정답표)를 먼저 본다. catalog stored에 LEGACY_PARENT_GROUPS의
+  // 자식 alias가 끼어들어 시드와 충돌하면 시드가 이긴다 — 분류DB 화면에 보이는
+  // 부호와 검증 부호가 항상 일치하도록 보장.
+  const seedEntry = findEntryByAlias(name, sectionName);
+  if (seedEntry) return seedEntry.sign as SignCode;
+  // 시드에 없는 alias만 catalog로 fallback (사용자가 분류DB에서 추가한
+  // OCR 이름 변형 등).
   if (catalogLookup) {
     const candidates = catalogLookup.get(normalizeLookupKeyLocal(name));
     if (candidates && candidates.length > 0) {
@@ -351,8 +358,6 @@ export function inferSignFromName(
       return candidates[0].sign;
     }
   }
-  const seedEntry = findEntryByAlias(name, sectionName);
-  if (seedEntry) return seedEntry.sign as SignCode;
   if (name.includes("_양수") || name.endsWith("양수")) return 0;
   if (name.includes("_음수") || name.endsWith("음수")) return 1;
   return null;
