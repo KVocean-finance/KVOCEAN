@@ -693,7 +693,7 @@ const UNCLASSIFIED_LABEL = "미분류";
 // Bump the version suffix whenever a deploy needs every browser to re-run
 // the sync once (e.g. when legacy source.* fields stop being written and
 // we want existing rows in Supabase to lose them on the next PUT).
-const CATALOG_SYNC_LS_KEY = "kvocean.lastSyncedCatalogSignature.v2";
+const CATALOG_SYNC_LS_KEY = "kvocean.lastSyncedCatalogSignature.v3";
 
 /**
  * Compact fingerprint of the sign-deciding fields of every catalog group.
