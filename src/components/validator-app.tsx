@@ -2977,15 +2977,21 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   }
 
   function loadDatasetIntoValidator(dataset: SavedQuarterSnapshot) {
-    // Drop stored sessionSignFixes when loading: the validator should re-decide
-    // signs from the current 분류DB. pasteEdits/nameEdits are kept because they
-    // are OCR value/name corrections — not sign overrides.
+    // Re-normalize paste edits against the *current* 분류DB/logicConfig — using
+    // dataset.source.* (the snapshot's frozen view of the rules) re-applies
+    // stale sign-driven absolute-value normalization that no longer matches
+    // the live catalog, which is what made loaded datasets fail validation
+    // even though a fresh paste of the same text passed.
+    //
+    // sessionSignFixes is dropped so the validator re-decides signs from the
+    // current 분류DB. nameEdits are kept because they are OCR name corrections,
+    // not sign overrides.
     const normalizedPasteEdits = normalizePasteEditsForValidation({
       pastedText: dataset.source.pastedText,
       selectedCompany: dataset.companyName,
-      logicConfig: dataset.source.logicConfig,
-      companyConfigs: dataset.source.companyConfigs,
-      classificationGroups: dataset.source.classificationGroups,
+      logicConfig,
+      companyConfigs,
+      classificationGroups,
       classificationCatalog,
       pasteEdits: dataset.source.pasteEdits,
       nameEdits: dataset.source.nameEdits ?? {},
@@ -3618,13 +3624,29 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       }> = [];
 
       for (const dataset of savedDatasets) {
+        // Re-normalize pasteEdits against the current 분류DB before validating.
+        // Stored pasteEdits were generated with the old catalog (sign=− rows
+        // got absolute-value normalization stamped in); if we feed them back
+        // unchanged, the check fails even though re-pasting the same text
+        // passes — because the new validator sees stale value normalization.
+        const reNormalizedPasteEdits = normalizePasteEditsForValidation({
+          pastedText: dataset.source.pastedText,
+          selectedCompany: dataset.companyName,
+          logicConfig,
+          companyConfigs,
+          classificationGroups,
+          classificationCatalog,
+          pasteEdits: dataset.source.pasteEdits ?? {},
+          nameEdits: dataset.source.nameEdits ?? {},
+          sessionSignFixes: {}
+        });
         const result = runValidation({
           pastedText: dataset.source.pastedText,
           selectedCompany: dataset.companyName,
           tolerance: dataset.source.tolerance ?? 0,
           logicConfig,
           companyConfigs,
-          pasteEdits: dataset.source.pasteEdits ?? {},
+          pasteEdits: reNormalizedPasteEdits,
           nameEdits: dataset.source.nameEdits ?? {},
           // Intentionally drop stored sessionSignFixes: this check answers
           // "does the data pass under the *current* 분류DB?". Stored sign
