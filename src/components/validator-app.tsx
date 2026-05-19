@@ -687,8 +687,10 @@ type ClassificationTreeNode = ClassificationTreeLeaf | ClassificationTreeBranch;
 
 const UNCLASSIFIED_LABEL = "미분류";
 
+// Same rule as normalizeLookupKey in defaults.ts — keeps OCR-side dedup
+// (occurrences, 미분류 detection) in sync with the validator's matching.
 function normalizeAliasKey(value: string): string {
-  return (value ?? "").replace(/\s+/g, "").toLowerCase();
+  return (value ?? "").replace(/[\s_\-.\/\\()\[\]·•'"]+/g, "").toLowerCase();
 }
 
 function buildClassificationTree(

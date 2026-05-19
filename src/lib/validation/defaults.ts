@@ -5,8 +5,14 @@ export type SignCode = 0 | 1 | 2;
 export type ClassificationEntry = ClassificationSeedEntry;
 export const CLASSIFICATION_ENTRIES: ClassificationEntry[] = CLASSIFICATION_SEED;
 
-function normalizeLookupKey(value: string): string {
-  return value.replace(/\s+/g, "").toLowerCase();
+// Treat whitespace and common separators as "absent" — same account name in
+// OCR can arrive as "단기대여금_대손충당금", "단기대여금 대손충당금",
+// "단기대여금-대손충당금", "대손충당금(단기대여금)" etc. We strip all of these
+// so identical glyph sequences collapse to one lookup key.
+// Audit confirmed (scripts/audit-seed-collisions.mjs): this introduces zero
+// new sign collisions across the 632-entry seed.
+export function normalizeLookupKey(value: string): string {
+  return (value ?? "").replace(/[\s_\-.\/\\()\[\]·•'"]+/g, "").toLowerCase();
 }
 
 // Some aliases appear in multiple seed entries (e.g. "전기오류수정손실" lives in both

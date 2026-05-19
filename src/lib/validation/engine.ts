@@ -15,6 +15,9 @@ export type DetailRow = {
   _row?: number;
   _col?: number;
   _allowedSigns?: SignCode[];
+  /** true when the account name did not match any seed/catalog entry and
+   * the sign was chosen by keyword fallback (or defaulted to +). */
+  unmatched?: boolean;
 };
 
 export type ValidationResult = {
@@ -310,8 +313,10 @@ export function applySign(value: number | null | undefined, signCode: SignCode |
   return signCode === 1 ? -numeric : numeric;
 }
 
+// Mirror of normalizeLookupKey in defaults.ts — kept in sync intentionally
+// to avoid an import cycle in this hot path. Update both together.
 function normalizeLookupKeyLocal(s: string) {
-  return (s ?? "").replace(/\s+/g, "").toLowerCase();
+  return (s ?? "").replace(/[\s_\-.\/\\()\[\]·•'"]+/g, "").toLowerCase();
 }
 
 /**
@@ -351,6 +356,31 @@ export function inferSignFromName(
   if (name.includes("_양수") || name.endsWith("양수")) return 0;
   if (name.includes("_음수") || name.endsWith("음수")) return 1;
   return null;
+}
+
+/**
+ * Resolve sign with explicit "matched" signal — wraps inferSignFromName and
+ * adds a keyword-based safety net for accounts that don't appear in the
+ * catalog/seed at all (so they don't silently default to +).
+ *
+ * Returned `matched=false` means the validation engine should surface this
+ * row as "미매칭" to the user — the sign was guessed, not looked up.
+ */
+export function resolveSign(
+  name: string,
+  logicConfig: LogicConfig,
+  sectionName?: string,
+  catalogLookup?: Map<string, CatalogAliasMatch[]>
+): { sign: SignCode; matched: boolean } {
+  const direct = inferSignFromName(name, logicConfig, sectionName, catalogLookup);
+  if (direct !== null) return { sign: direct, matched: true };
+
+  const plusHit = (logicConfig.plusOverrideKeywords ?? []).some((kw) => kw && name.includes(kw));
+  if (!plusHit) {
+    const minusHit = (logicConfig.minusKeywords ?? []).some((kw) => kw && name.includes(kw));
+    if (minusHit) return { sign: 1, matched: false };
+  }
+  return { sign: 0, matched: false };
 }
 
 function getAccountValue(nameToValue: Record<string, { value: number | null; col: number }>, account: string): number | null {
@@ -455,16 +485,24 @@ export function validatePasteSections(
         continue;
       }
 
-      let sign = inferSignFromName(child.name, logicConfig, sect, catalogLookup);
+      // 1) Try catalog/seed lookup (with section disambiguation + keyword fallback).
+      const resolution = resolveSign(child.name, logicConfig, sect, catalogLookup);
+      let sign: SignCode | null = resolution.sign;
+      let unmatched = !resolution.matched;
+
+      // 2) Section-level overrides (e.g. 유동부채/퇴직연금운용자산 → −).
       const sectOverride = sectionOverrides[sect] ?? {};
       for (const [keyword, override] of Object.entries(sectOverride)) {
         if (child.name.includes(keyword)) {
           sign = override;
+          unmatched = false;
           break;
         }
       }
+      // 3) Per-session manual fixes always win.
       if (sessionSignFixes[sect]?.[child.name] !== undefined) {
         sign = sessionSignFixes[sect][child.name];
+        unmatched = false;
       }
       if (sign === 2) {
         used.push({ 계정명: child.name, 원본값: child.val!, 부호: "제외", 적용값: 0, _row: rowIndex, _col: child.col });
@@ -473,7 +511,15 @@ export function validatePasteSections(
       const resolvedSign = (sign ?? 0) as 0 | 1;
       const signedValue = applySign(child.val, resolvedSign);
       computed += signedValue;
-      used.push({ 계정명: child.name, 원본값: child.val!, 부호: resolvedSign === 1 ? "−" : "+", 적용값: signedValue, _row: rowIndex, _col: child.col });
+      used.push({
+        계정명: child.name,
+        원본값: child.val!,
+        부호: unmatched ? `${resolvedSign === 1 ? "−" : "+"}?` : (resolvedSign === 1 ? "−" : "+"),
+        적용값: signedValue,
+        _row: rowIndex,
+        _col: child.col,
+        ...(unmatched ? { unmatched: true } : {})
+      });
     }
 
     const diff = parentVal - computed;
