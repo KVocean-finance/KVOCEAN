@@ -1228,40 +1228,87 @@ function ClassificationTableViewInner({
   const [page, setPage] = useState(0);
   const [showOnlyUnclassified, setShowOnlyUnclassified] = useState(initialFilters?.showOnlyUnclassified ?? false);
   const [showOnlyEncountered, setShowOnlyEncountered] = useState(initialFilters?.showOnlyEncountered ?? false);
-  const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
-  const [draft, setDraft] = useState<EditableDraft | null>(null);
 
-  function startEdit(row: ClassificationTableRow) {
-    setEditingRowKey(row.rowKey);
-    setDraft({
+  // Bulk-edit mode: 토글로 편집 활성화 → 여러 행 수정 → 일괄 저장/취소.
+  // drafts holds the in-progress edits keyed by rowKey; rows not in the map
+  // render their saved values. A row is "dirty" iff its draft differs from
+  // its current saved/seed value.
+  const [editMode, setEditMode] = useState(false);
+  const [drafts, setDrafts] = useState<Map<string, EditableDraft>>(new Map());
+
+  function rowToDraft(row: ClassificationTableRow): EditableDraft {
+    return {
       대분류: row.대분류,
       중분류: row.중분류,
       소분류: row.소분류,
       세분류: row.세분류,
       sign: row.sign
+    };
+  }
+  function getDraft(row: ClassificationTableRow): EditableDraft {
+    return drafts.get(row.rowKey) ?? rowToDraft(row);
+  }
+  function isDirty(row: ClassificationTableRow): boolean {
+    const d = drafts.get(row.rowKey);
+    if (!d) return false;
+    return (
+      d.대분류 !== row.대분류
+      || d.중분류 !== row.중분류
+      || d.소분류 !== row.소분류
+      || d.세분류 !== row.세분류
+      || d.sign !== row.sign
+    );
+  }
+  function updateDraft(row: ClassificationTableRow, partial: Partial<EditableDraft>) {
+    setDrafts((prev) => {
+      const next = new Map(prev);
+      const current = next.get(row.rowKey) ?? rowToDraft(row);
+      next.set(row.rowKey, { ...current, ...partial });
+      return next;
     });
   }
-  function cancelEdit() {
-    setEditingRowKey(null);
-    setDraft(null);
+  function discardRowDraft(rowKey: string) {
+    setDrafts((prev) => {
+      if (!prev.has(rowKey)) return prev;
+      const next = new Map(prev);
+      next.delete(rowKey);
+      return next;
+    });
   }
-  function saveEdit(row: ClassificationTableRow) {
-    if (!draft) return;
-    const result = validateDraft(draft, options);
-    if (!result.entry) return; // button disabled anyway
+  function enterEditMode() {
+    setEditMode(true);
+    setDrafts(new Map());
+  }
+  function exitEditMode() {
+    setEditMode(false);
+    setDrafts(new Map());
+  }
+  function saveAllDrafts() {
     const next = new Map(overrides);
-    next.set(row.항목명, {
-      code: result.entry.code,
-      대분류: draft.대분류,
-      중분류: draft.중분류,
-      소분류: draft.소분류,
-      세분류: draft.세분류,
-      sign: result.entry.sign
-    });
-    setOverrides(next);
-    setEditingRowKey(null);
-    setDraft(null);
-    onOverridesChange?.(next);
+    let saved = 0;
+    for (const [rowKey, draft] of drafts.entries()) {
+      const row = allRows.find((r) => r.rowKey === rowKey);
+      if (!row) continue;
+      // skip rows whose draft equals the saved value (no actual change)
+      if (!isDirty(row)) continue;
+      const result = validateDraft(draft, options);
+      if (!result.entry) continue;
+      next.set(row.항목명, {
+        code: result.entry.code,
+        대분류: draft.대분류,
+        중분류: draft.중분류,
+        소분류: draft.소분류,
+        세분류: draft.세분류,
+        sign: result.entry.sign
+      });
+      saved++;
+    }
+    if (saved > 0) {
+      setOverrides(next);
+      onOverridesChange?.(next);
+    }
+    setEditMode(false);
+    setDrafts(new Map());
   }
   function revertOverride(itemName: string) {
     if (!overrides.has(itemName)) return;
@@ -1318,6 +1365,15 @@ function ClassificationTableViewInner({
 
   const unclassifiedCount = allRows.filter((r) => r.isUnclassified).length;
   const encounteredCount = allRows.filter((r) => r.occurrences > 0 && !r.isUnclassified).length;
+  const dirtyCount = useMemo(() => {
+    if (!editMode || !drafts.size) return 0;
+    let n = 0;
+    for (const row of allRows) {
+      if (isDirty(row)) n++;
+    }
+    return n;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allRows, drafts, editMode]);
 
   return (
     <div className="classification-table-view">
@@ -1340,7 +1396,25 @@ function ClassificationTableViewInner({
         <span className="muted" style={{ marginLeft: "auto", fontSize: 12 }}>
           전체 {allRows.length.toLocaleString()} · 필터 후 {sorted.length.toLocaleString()}
         </span>
+        {editMode ? (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span className="muted" style={{ fontSize: 12 }}>
+              {dirtyCount > 0 ? `${dirtyCount}개 행 수정됨` : "수정사항 없음"}
+            </span>
+            <button type="button" className="ghost-button" onClick={exitEditMode}>변경사항 취소</button>
+            <button type="button" className="button" disabled={dirtyCount === 0} onClick={saveAllDrafts}>
+              수정사항 업데이트{dirtyCount > 0 ? ` (${dirtyCount})` : ""}
+            </button>
+          </div>
+        ) : (
+          <button type="button" className="ghost-button" onClick={enterEditMode}>편집모드</button>
+        )}
       </div>
+      {editMode && (
+        <div className="muted" style={{ fontSize: 12, padding: "6px 12px", background: "#fffbeb", borderRadius: 6 }}>
+          편집모드입니다. 셀의 드롭다운을 바꾸면 행이 노란색으로 강조됩니다. 변경 후 「수정사항 업데이트」를 눌러야 분류DB에 저장됩니다.
+        </div>
+      )}
 
       <div className="classification-table-scroll">
         <table className="table report-table classification-flat-table">
@@ -1359,35 +1433,36 @@ function ClassificationTableViewInner({
           </thead>
           <tbody>
             {pageRows.map((row) => {
-              const isEditing = editingRowKey === row.rowKey && draft;
               const hasOverride = overrides.has(row.항목명);
-              const rowClass = `${row.isUnclassified ? "row-unclassified" : ""}${row.occurrences > 0 && !row.isUnclassified ? " row-encountered" : ""}${hasOverride ? " row-override" : ""}${isEditing ? " row-editing" : ""}`.trim();
+              const dirty = editMode && isDirty(row);
+              const rowClass = `${row.isUnclassified ? "row-unclassified" : ""}${row.occurrences > 0 && !row.isUnclassified ? " row-encountered" : ""}${hasOverride ? " row-override" : ""}${dirty ? " row-modified" : ""}`.trim();
 
-              if (isEditing && draft) {
+              if (editMode) {
+                const draft = getDraft(row);
                 const validation = validateDraft(draft, options);
                 const 중Options = options.중분류_BY_대.get(draft.대분류) ?? [];
                 const 소Options = options.소분류_BY_대중.get(`${draft.대분류}|${draft.중분류}`) ?? [];
                 const 세Options = options.세분류_BY_대중소.get(`${draft.대분류}|${draft.중분류}|${draft.소분류}`) ?? [];
-                // 세분류 names (unique) — sign chooses between +/− variants
                 const 세Names = Array.from(new Set(세Options.map((x) => x.세분류))).sort((a, b) => a.localeCompare(b, "ko"));
+                const dirtyStyle = dirty ? { background: "#fef3c7" } : undefined;
                 return (
                   <Fragment key={row.rowKey}>
-                    <tr className={rowClass}>
-                      <td className="cell-code">{validation.entry ? validation.entry.code : "—"}</td>
+                    <tr className={rowClass} style={dirtyStyle}>
+                      <td className="cell-code">{validation.entry ? validation.entry.code : (row.code === UNCLASSIFIED_ROW_CODE ? "—" : row.code)}</td>
                       <td>
-                        <select className="select cell-select" value={draft.대분류} onChange={(e) => setDraft({ 대분류: e.target.value, 중분류: "", 소분류: "", 세분류: "", sign: 0 })}>
+                        <select className="select cell-select" value={draft.대분류} onChange={(e) => updateDraft(row, { 대분류: e.target.value, 중분류: "", 소분류: "", 세분류: "", sign: 0 })}>
                           <option value="">선택</option>
                           {options.대분류_OPTIONS.map((x) => <option key={x} value={x}>{x}</option>)}
                         </select>
                       </td>
                       <td>
-                        <select className="select cell-select" value={draft.중분류} disabled={!draft.대분류} onChange={(e) => setDraft({ ...draft, 중분류: e.target.value, 소분류: "", 세분류: "" })}>
+                        <select className="select cell-select" value={draft.중분류} disabled={!draft.대분류} onChange={(e) => updateDraft(row, { 중분류: e.target.value, 소분류: "", 세분류: "" })}>
                           <option value="">선택</option>
                           {중Options.map((x) => <option key={x} value={x}>{x}</option>)}
                         </select>
                       </td>
                       <td>
-                        <select className="select cell-select" value={draft.소분류} disabled={!draft.중분류} onChange={(e) => setDraft({ ...draft, 소분류: e.target.value, 세분류: "" })}>
+                        <select className="select cell-select" value={draft.소분류} disabled={!draft.중분류} onChange={(e) => updateDraft(row, { 소분류: e.target.value, 세분류: "" })}>
                           <option value="">선택</option>
                           {소Options.map((x) => <option key={x} value={x}>{x}</option>)}
                         </select>
@@ -1395,28 +1470,26 @@ function ClassificationTableViewInner({
                       <td>
                         <select className="select cell-select" value={draft.세분류} disabled={!draft.소분류} onChange={(e) => {
                           const name = e.target.value;
-                          // Pick first matching code/sign as default (user can flip sign next)
                           const first = 세Options.find((x) => x.세분류 === name);
-                          setDraft({ ...draft, 세분류: name, sign: first ? first.sign : draft.sign });
+                          updateDraft(row, { 세분류: name, sign: first ? first.sign : draft.sign });
                         }}>
                           <option value="">선택</option>
                           {세Names.map((x) => <option key={x} value={x}>{x}</option>)}
                         </select>
                       </td>
-                      <td className="cell-name">{row.항목명}</td>
+                      <td className="cell-name">{row.항목명}{hasOverride && <span className="override-tag">수정됨</span>}</td>
                       <td>
-                        <select className="select cell-select-narrow" value={String(draft.sign)} onChange={(e) => setDraft({ ...draft, sign: Number(e.target.value) as 0 | 1 })}>
+                        <select className="select cell-select-narrow" value={String(draft.sign)} onChange={(e) => updateDraft(row, { sign: Number(e.target.value) as 0 | 1 })}>
                           <option value="0">+</option>
                           <option value="1">−</option>
                         </select>
                       </td>
                       <td className="cell-source">{formatRowSources(row.sources)}</td>
                       <td className="cell-actions">
-                        <button type="button" className="button button-tiny" disabled={!validation.entry} onClick={() => saveEdit(row)}>저장</button>
-                        <button type="button" className="ghost-button button-tiny" onClick={cancelEdit}>취소</button>
+                        {dirty && <button type="button" className="ghost-button button-tiny" onClick={() => discardRowDraft(row.rowKey)} title="이 행 변경 취소">↺</button>}
                       </td>
                     </tr>
-                    {validation.error && (
+                    {dirty && validation.error && (
                       <tr className="row-validation-error">
                         <td colSpan={9} className="validation-error-cell">⚠️ {validation.error}</td>
                       </tr>
@@ -1438,7 +1511,6 @@ function ClassificationTableViewInner({
                   </td>
                   <td className="cell-source">{formatRowSources(row.sources)}</td>
                   <td className="cell-actions">
-                    <button type="button" className="ghost-button button-tiny" onClick={() => startEdit(row)}>편집</button>
                     {hasOverride && <button type="button" className="ghost-button button-tiny" onClick={() => revertOverride(row.항목명)} title="원래대로">↺</button>}
                   </td>
                 </tr>
