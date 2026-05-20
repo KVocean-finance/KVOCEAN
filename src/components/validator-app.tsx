@@ -2567,6 +2567,18 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     // 그 값이 들어있어 이 브라우저는 작업을 건너뛴다. 서버 컬럼이 없으면
     // (마이그레이션 전) null이 와서 localStorage 기반으로 자연스럽게 fallback된다.
     const lastSignature = serverSyncSignatureRef.current ?? localSignature;
+    // 임시 진단 로그 — 동기화가 매번 도는 원인 추적용. 원인 확정 후 제거.
+    console.log("[KVOCEAN sync-diag]", {
+      willSkip: !!lastSignature && lastSignature === currentSignature,
+      currentLen: currentSignature.length,
+      serverLen: serverSyncSignatureRef.current?.length ?? null,
+      localLen: localSignature?.length ?? null,
+      firstDiff: lastSignature
+        ? [...currentSignature].findIndex((ch, i) => ch !== lastSignature[i])
+        : -1,
+      currentHead: currentSignature.slice(0, 160),
+      lastHead: lastSignature?.slice(0, 160) ?? null
+    });
     if (lastSignature && lastSignature === currentSignature) {
       // Catalog hasn't moved since the datasets were last synced — nothing to do.
       return;
