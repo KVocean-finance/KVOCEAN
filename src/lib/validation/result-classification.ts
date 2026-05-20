@@ -1,5 +1,6 @@
 // AUTO-GENERATED from 재무제표 음양.xlsx via scripts/generate_result_db.py
 // 결과물DB: 보고서·매트릭스 생성 시 사용. 분류DB(시드)는 OCR 매칭/부호용.
+// sign은 분류DB(시드)에서 동기화 — 부호의 진실원천은 시드.
 // DO NOT EDIT BY HAND.
 
 export type ResultClassificationEntry = {
