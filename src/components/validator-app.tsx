@@ -2300,12 +2300,15 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
 
       try {
         // datasets pre-loaded server-side when available; only fetch if not provided
-        const fetchPromises: [Promise<Response>, Promise<Response> | null] = [
-          fetch("/api/shared-state", { cache: "no-store" }),
-          initialDatasets ? null : fetch("/api/datasets", { cache: "no-store" })
-        ];
-        const [configResponse, datasetsResponse] = await Promise.all(fetchPromises);
-        __bootLog("fetch done");
+        // 임시 진단 — 두 fetch를 분리 측정해 어느 쪽이 느린지 본다.
+        const sharedStateFetch = fetch("/api/shared-state", { cache: "no-store" })
+          .then((response) => { __bootLog("shared-state fetched"); return response; });
+        const datasetsFetch: Promise<Response | null> = initialDatasets
+          ? Promise.resolve(null)
+          : fetch("/api/datasets", { cache: "no-store" })
+              .then((response) => { __bootLog("datasets fetched"); return response; });
+        const [configResponse, datasetsResponse] = await Promise.all([sharedStateFetch, datasetsFetch]);
+        __bootLog("both fetches done");
 
         if (!configResponse.ok) {
           throw new Error("공용 데이터를 불러오지 못했습니다.");
