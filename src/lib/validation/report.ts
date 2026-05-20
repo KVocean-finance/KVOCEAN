@@ -564,12 +564,10 @@ function getRowEntries(rows: StatementMatrixRow[], candidates: string[], section
     const byCode = codeSet.size > 0 && typeof row.code === "number" && codeSet.has(row.code);
     const byName = canonicalCandidates.some((candidate) => rowKey === candidate || rowName === candidate);
     const bySection = !canonicalSection || row.sectionKey === canonicalSection || normalizeSectionKey(row.section) === canonicalSection;
-    // 묶음 키워드면: code가 있는 행은 code로만 판정한다. 이름 매칭을 OR로 두면
-    // "판매비와관리비" 같은 부모·총계 항목이 끌려들어와 합계가 이중 계산된다.
-    // code 없는 옛 행만 이름 매칭으로 fallback.
-    const byMembership = codeSet.size > 0
-      ? (typeof row.code === "number" ? byCode : byName)
-      : byName;
+    // 묶음 키워드면 code로만 판정한다. 이름 매칭을 fallback으로 두면
+    // "매출원가"·"판매비와관리비" 같은 부모·총계 줄(분류DB 매칭이 안 돼
+    // code가 없는)이 이름으로 끌려들어와 합계가 이중 계산된다.
+    const byMembership = codeSet.size > 0 ? byCode : byName;
     return byMembership && bySection;
   });
 
@@ -750,10 +748,8 @@ function sumClassifiedValues(rows: StatementMatrixRow[], periodKey: string, cand
       const byCode = codeSet.size > 0 && typeof row.code === "number" && codeSet.has(row.code);
       const byName = canonicalCandidates.has(rowKey) || canonicalCandidates.has(rowName);
       const bySection = !canonicalSection || row.sectionKey === canonicalSection || normalizeSectionKey(row.section) === canonicalSection;
-      // code가 있는 행은 code로만 판정 — 부모·총계 항목이 이름 매칭으로 끌려들지 않게.
-      const byMembership = codeSet.size > 0
-        ? (typeof row.code === "number" ? byCode : byName)
-        : byName;
+      // 묶음 키워드면 code로만 판정 — 부모·총계 줄이 이름 매칭으로 끌려들지 않게.
+      const byMembership = codeSet.size > 0 ? byCode : byName;
       return byMembership && bySection;
     })
     , preferredSections).sort((a, b) => {
@@ -782,10 +778,8 @@ function getClassifiedRows(rows: StatementMatrixRow[], candidates: string[], sec
     const byCode = codeSet.size > 0 && typeof row.code === "number" && codeSet.has(row.code);
     const byName = canonicalCandidates.has(rowKey) || canonicalCandidates.has(rowName);
     const bySection = !canonicalSection || row.sectionKey === canonicalSection || normalizeSectionKey(row.section) === canonicalSection;
-    // code가 있는 행은 code로만 판정 — 부모·총계 항목이 이름 매칭으로 끌려들지 않게.
-    const byMembership = codeSet.size > 0
-      ? (typeof row.code === "number" ? byCode : byName)
-      : byName;
+    // 묶음 키워드면 code로만 판정 — 부모·총계 줄이 이름 매칭으로 끌려들지 않게.
+    const byMembership = codeSet.size > 0 ? byCode : byName;
     return byMembership && bySection;
   }), getPreferredSectionKeys(candidates));
 }
