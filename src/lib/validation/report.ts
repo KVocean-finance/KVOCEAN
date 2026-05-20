@@ -519,7 +519,9 @@ export function normalizePasteEditsForValidation(args: {
   return nextPasteEdits;
 }
 
-function getRowValues(rows: StatementMatrixRow[], periodKey: string, candidates: string[], sectionName: string | undefined, classificationGroups: ClassificationGroups) {
+// 합계(getRowValues)와 breakdown(getRowEntries 기반)이 동일한 row 목록을
+// 공유하도록, 행 선별·정렬 로직은 여기 한 곳에 둔다.
+function getRowEntries(rows: StatementMatrixRow[], candidates: string[], sectionName: string | undefined, classificationGroups: ClassificationGroups) {
   const canonicalCandidates = candidates.flatMap((candidate) => {
     const base = [candidate];
     const aliases = classificationGroups[candidate] ?? [];
@@ -545,7 +547,26 @@ function getRowValues(rows: StatementMatrixRow[], periodKey: string, candidates:
       const aExact = canonicalCandidates.includes(normalizeText(a.canonicalKey || a.accountName)) ? 1 : 0;
       const bExact = canonicalCandidates.includes(normalizeText(b.canonicalKey || b.accountName)) ? 1 : 0;
       return bExact - aExact;
+    });
+}
+
+function rowEntriesToBreakdown(entries: StatementMatrixRow[], periodKey: string) {
+  return entries
+    .map<MetricCalculationInput | null>((row) => {
+      const value = row.values[periodKey];
+      if (value === null || value === undefined) {
+        return null;
+      }
+      const label = row.accountName === row.canonicalKey
+        ? row.accountName
+        : `${row.canonicalKey} ← ${row.accountName}`;
+      return { label, value } satisfies MetricCalculationInput;
     })
+    .filter((item): item is MetricCalculationInput => item !== null);
+}
+
+function getRowValues(rows: StatementMatrixRow[], periodKey: string, candidates: string[], sectionName: string | undefined, classificationGroups: ClassificationGroups) {
+  return getRowEntries(rows, candidates, sectionName, classificationGroups)
     .map((row) => row.values[periodKey])
     .filter((value): value is number => value !== null && value !== undefined);
 }
@@ -760,6 +781,22 @@ function getNetMetricBreakdown(context: MetricContext, periodKey: string, names:
       } satisfies MetricCalculationInput;
     })
     .filter((item): item is MetricCalculationInput => item !== null);
+}
+
+// raw/adjusted 합계(getRawMetricSum/getAdjustedMetricSum)와 같은 row 목록을
+// 펼친 breakdown. 합계와 멤버 합이 정확히 일치한다.
+function getRawMetricBreakdown(context: MetricContext, periodKey: string, names: string[], sectionName?: string) {
+  return rowEntriesToBreakdown(
+    getRowEntries(context.rawRows, names, sectionName, context.classificationGroups),
+    periodKey
+  );
+}
+
+function getAdjustedMetricBreakdown(context: MetricContext, periodKey: string, names: string[], sectionName?: string) {
+  return rowEntriesToBreakdown(
+    getRowEntries(context.adjustedRows, names, sectionName, context.classificationGroups),
+    periodKey
+  );
 }
 
 function getMetricValue(context: MetricContext, periodKey: string, names: string[]) {
@@ -1156,6 +1193,12 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
     }
     return getAdjustedMetricSum(current, period.key, [label], "영업비용");
   };
+  const costStructureBreakdown = (period: ReportPeriod, current: MetricContext, label: string) => {
+    if (label === "총이자비용") {
+      return getClassifiedMetricBreakdown(current, period.key, ["이자비용"], "영업외비용");
+    }
+    return getAdjustedMetricBreakdown(current, period.key, [label], "영업비용");
+  };
 
   const costStructureSpecs = COST_STRUCTURE_ITEMS.map((label) => ({
     label,
@@ -1164,7 +1207,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
       label === "총이자비용" ? "영업외비용 섹션 내 이자비용 관련 계정 합계" : `${label} 계정 합계`,
       result,
       [
-        { label, value: costStructureValue(period, current, label) }
+        { label, value: costStructureValue(period, current, label), components: costStructureBreakdown(period, current, label) }
       ]
     ),
     ratio: (period: ReportPeriod, current: MetricContext) => {
@@ -1184,7 +1227,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         `${label} / (매출원가 + 판매비와관리비 + 영업외비용) * 100`,
         result,
         [
-          { label, value },
+          { label, value, components: costStructureBreakdown(period, current, label) },
           { label: "매출원가", value: costOfSales },
           { label: "판매비와관리비", value: operatingExpense },
           { label: "영업외비용", value: nonOperatingExpense },
@@ -1202,14 +1245,14 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
       amountDetail: (period, current, result) => createCalculationDetail(
         "현금및현금성자산 계정 합계",
         result,
-        [{ label: "현금및현금성자산", value: getRawMetricSum(current, period.key, ["현금및현금성자산"]) }]
+        [{ label: "현금및현금성자산", value: getRawMetricSum(current, period.key, ["현금및현금성자산"]), components: getRawMetricBreakdown(current, period.key, ["현금및현금성자산"]) }]
       ),
       ratio: (period, current) => safeDivide(getRawMetricSum(current, period.key, ["현금및현금성자산"]), getPreferredTotalAssets(current, period.key), 100),
       ratioDetail: (period, current, result) => {
         const cash = getRawMetricSum(current, period.key, ["현금및현금성자산"]);
         const assets = getPreferredTotalAssets(current, period.key);
         return createCalculationDetail("현금및현금성자산 / 자산 * 100", result, [
-          { label: "현금및현금성자산", value: cash },
+          { label: "현금및현금성자산", value: cash, components: getRawMetricBreakdown(current, period.key, ["현금및현금성자산"]) },
           { label: "자산", value: assets }
         ], assets === 0 ? "자산이 0이라 비율을 계산하지 않았습니다." : undefined);
       }
@@ -1220,14 +1263,14 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
       amountDetail: (period, current, result) => createCalculationDetail(
         "매도가능증권 계정 합계",
         result,
-        [{ label: "매도가능증권", value: getRawMetricSum(current, period.key, ["매도가능증권"]) }]
+        [{ label: "매도가능증권", value: getRawMetricSum(current, period.key, ["매도가능증권"]), components: getRawMetricBreakdown(current, period.key, ["매도가능증권"]) }]
       ),
       ratio: (period, current) => safeDivide(getRawMetricSum(current, period.key, ["매도가능증권"]), getPreferredTotalAssets(current, period.key), 100),
       ratioDetail: (period, current, result) => {
         const availableForSale = getRawMetricSum(current, period.key, ["매도가능증권"]);
         const assets = getPreferredTotalAssets(current, period.key);
         return createCalculationDetail("매도가능증권 / 자산 * 100", result, [
-          { label: "매도가능증권", value: availableForSale },
+          { label: "매도가능증권", value: availableForSale, components: getRawMetricBreakdown(current, period.key, ["매도가능증권"]) },
           { label: "자산", value: assets }
         ], assets === 0 ? "자산이 0이라 비율을 계산하지 않았습니다." : undefined);
       }
@@ -1238,7 +1281,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
       amountDetail: (period, current, result) => {
         const loans = getAdjustedMetricSum(current, period.key, ["단기대여금"]);
         return createCalculationDetail("단기대여금 계정 합계", result, [
-          { label: "단기대여금", value: loans, components: getClassifiedMetricBreakdown(current, period.key, ["단기대여금"]) }
+          { label: "단기대여금", value: loans, components: getAdjustedMetricBreakdown(current, period.key, ["단기대여금"]) }
         ]);
       },
       ratio: (period, current) => safeDivide(getAdjustedMetricSum(current, period.key, ["단기대여금"]), getPreferredTotalAssets(current, period.key), 100),
@@ -1246,7 +1289,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         const loans = getAdjustedMetricSum(current, period.key, ["단기대여금"]);
         const assets = getPreferredTotalAssets(current, period.key);
         return createCalculationDetail("단기대여금 / 자산 * 100", result, [
-          { label: "단기대여금", value: loans },
+          { label: "단기대여금", value: loans, components: getAdjustedMetricBreakdown(current, period.key, ["단기대여금"]) },
           { label: "자산", value: assets }
         ], assets === 0 ? "자산이 0이라 비율을 계산하지 않았습니다." : undefined);
       }
@@ -1257,7 +1300,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
       amountDetail: (period, current, result) => {
         const developmentAsset = getAdjustedMetricSum(current, period.key, ["개발비(자산)", "개발비"]);
         return createCalculationDetail("개발비(자산) 계정 합계", result, [
-          { label: "개발비(자산)", value: developmentAsset, components: getClassifiedMetricBreakdown(current, period.key, ["개발비(자산)"]) }
+          { label: "개발비(자산)", value: developmentAsset, components: getAdjustedMetricBreakdown(current, period.key, ["개발비(자산)", "개발비"]) }
         ]);
       },
       ratio: (period, current) => safeDivide(getAdjustedMetricSum(current, period.key, ["개발비(자산)", "개발비"]), getPreferredTotalAssets(current, period.key), 100),
@@ -1265,7 +1308,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         const developmentAsset = getAdjustedMetricSum(current, period.key, ["개발비(자산)", "개발비"]);
         const assets = getPreferredTotalAssets(current, period.key);
         return createCalculationDetail("개발비(자산) / 자산 * 100", result, [
-          { label: "개발비(자산)", value: developmentAsset },
+          { label: "개발비(자산)", value: developmentAsset, components: getAdjustedMetricBreakdown(current, period.key, ["개발비(자산)", "개발비"]) },
           { label: "자산", value: assets }
         ], assets === 0 ? "자산이 0이라 비율을 계산하지 않았습니다." : undefined);
       }
@@ -1276,7 +1319,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
       amountDetail: (period, current, result) => {
         const prepaid = getAdjustedMetricSum(current, period.key, ["선급금"]);
         return createCalculationDetail("선급금 계정 합계", result, [
-          { label: "선급금", value: prepaid, components: getClassifiedMetricBreakdown(current, period.key, ["선급금"]) }
+          { label: "선급금", value: prepaid, components: getAdjustedMetricBreakdown(current, period.key, ["선급금"]) }
         ]);
       },
       ratio: (period, current) => safeDivide(getAdjustedMetricSum(current, period.key, ["선급금"]), getPreferredTotalAssets(current, period.key), 100),
@@ -1284,7 +1327,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         const prepaid = getAdjustedMetricSum(current, period.key, ["선급금"]);
         const assets = getPreferredTotalAssets(current, period.key);
         return createCalculationDetail("선급금 / 자산 * 100", result, [
-          { label: "선급금", value: prepaid },
+          { label: "선급금", value: prepaid, components: getAdjustedMetricBreakdown(current, period.key, ["선급금"]) },
           { label: "자산", value: assets }
         ], assets === 0 ? "자산이 0이라 비율을 계산하지 않았습니다." : undefined);
       }
@@ -1295,14 +1338,14 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
       amountDetail: (period, current, result) => createCalculationDetail(
         "가수금 계정 합계",
         result,
-        [{ label: "가수금", value: getRawMetricSum(current, period.key, ["가수금"]) }]
+        [{ label: "가수금", value: getRawMetricSum(current, period.key, ["가수금"]), components: getRawMetricBreakdown(current, period.key, ["가수금"]) }]
       ),
       ratio: (period, current) => safeDivide(getRawMetricSum(current, period.key, ["가수금"]), getPreferredTotalLiabilities(current, period.key), 100),
       ratioDetail: (period, current, result) => {
         const suspense = getRawMetricSum(current, period.key, ["가수금"]);
         const liabilities = getPreferredTotalLiabilities(current, period.key);
         return createCalculationDetail("가수금 / 부채 * 100", result, [
-          { label: "가수금", value: suspense },
+          { label: "가수금", value: suspense, components: getRawMetricBreakdown(current, period.key, ["가수금"]) },
           { label: "부채", value: liabilities }
         ], liabilities === 0 ? "부채가 0이라 비율을 계산하지 않았습니다." : undefined);
       }
@@ -1313,14 +1356,14 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
       amountDetail: (period, current, result) => createCalculationDetail(
         "가지급금 계정 합계",
         result,
-        [{ label: "가지급금", value: getRawMetricSum(current, period.key, ["가지급금"]) }]
+        [{ label: "가지급금", value: getRawMetricSum(current, period.key, ["가지급금"]), components: getRawMetricBreakdown(current, period.key, ["가지급금"]) }]
       ),
       ratio: (period, current) => safeDivide(getRawMetricSum(current, period.key, ["가지급금"]), getPreferredTotalAssets(current, period.key), 100),
       ratioDetail: (period, current, result) => {
         const advances = getRawMetricSum(current, period.key, ["가지급금"]);
         const assets = getPreferredTotalAssets(current, period.key);
         return createCalculationDetail("가지급금 / 자산 * 100", result, [
-          { label: "가지급금", value: advances },
+          { label: "가지급금", value: advances, components: getRawMetricBreakdown(current, period.key, ["가지급금"]) },
           { label: "자산", value: assets }
         ], assets === 0 ? "자산이 0이라 비율을 계산하지 않았습니다." : undefined);
       }
@@ -1333,7 +1376,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
       amountDetail: (period, current, result) => {
         const retirementProvision = getAdjustedMetricSum(current, period.key, ["퇴직급여충당부채"]);
         return createCalculationDetail("퇴직급여충당부채 계정 합계", result, [
-          { label: "퇴직급여충당부채", value: retirementProvision }
+          { label: "퇴직급여충당부채", value: retirementProvision, components: getAdjustedMetricBreakdown(current, period.key, ["퇴직급여충당부채"]) }
         ]);
       },
       ratio: (period, current) => {
@@ -1344,7 +1387,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         const value = getAdjustedMetricSum(current, period.key, ["퇴직급여충당부채"]);
         const liabilities = getPreferredTotalLiabilities(current, period.key);
         return createCalculationDetail("퇴직급여충당부채 / 부채 * 100", result, [
-          { label: "퇴직급여충당부채", value },
+          { label: "퇴직급여충당부채", value, components: getAdjustedMetricBreakdown(current, period.key, ["퇴직급여충당부채"]) },
           { label: "부채", value: liabilities }
         ], liabilities === 0 ? "부채가 0이라 비율을 계산하지 않았습니다." : undefined);
       }
@@ -1403,7 +1446,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         const borrowings = getClassifiedMetricSum(current, period.key, ["차입금"]);
         const assets = getPreferredTotalAssets(current, period.key);
         return createCalculationDetail("순차입금 / 자산 * 100", result, [
-          { label: "순차입금", value: borrowings },
+          { label: "순차입금", value: borrowings, components: getClassifiedMetricBreakdown(current, period.key, ["차입금"]) },
           { label: "자산", value: assets }
         ], assets === 0 ? "자산이 0이라 비율을 계산하지 않았습니다." : undefined);
       }
@@ -1416,7 +1459,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         const interestExpense = getClassifiedMetricSum(current, period.key, ["이자비용"]);
         return createCalculationDetail("영업이익 / 이자비용 * 100", result, [
           { label: "영업이익", value: operatingIncome },
-          { label: "이자비용", value: interestExpense }
+          { label: "이자비용", value: interestExpense, components: getClassifiedMetricBreakdown(current, period.key, ["이자비용"]) }
         ], interestExpense === 0 ? "이자비용이 0이라 비율을 계산하지 않았습니다." : undefined);
       }
     }
@@ -1539,7 +1582,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         return createCalculationDetail("매출액 / ((해당연도 1분기 매출채권 + 현재 분기 매출채권) / 2)", result, [
           { label: "매출액", value: sales },
           { label: formatPeriodInputLabel("기초 매출채권(해당연도 1분기)", basePeriod), value: baseReceivables },
-          { label: formatPeriodInputLabel("기말 매출채권(현재 분기)", period), value: currentReceivables },
+          { label: formatPeriodInputLabel("기말 매출채권(현재 분기)", period), value: currentReceivables, components: getClassifiedMetricBreakdown(current, period.key, ["매출채권"]) },
           { label: "평균매출채권", value: averageReceivables }
         ], !basePeriod ? "해당 연도 1분기 매출채권이 없어 계산하지 않았습니다." : averageReceivables === 0 ? "평균매출채권이 0이라 회전율을 계산하지 않았습니다." : undefined);
       }
@@ -1564,7 +1607,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         return createCalculationDetail("365 / 매출채권회전율", result, [
           { label: "매출액", value: sales },
           { label: formatPeriodInputLabel("기초 매출채권(해당연도 1분기)", basePeriod), value: baseReceivables },
-          { label: formatPeriodInputLabel("기말 매출채권(현재 분기)", period), value: currentReceivables },
+          { label: formatPeriodInputLabel("기말 매출채권(현재 분기)", period), value: currentReceivables, components: getClassifiedMetricBreakdown(current, period.key, ["매출채권"]) },
           { label: "평균매출채권", value: averageReceivables },
           { label: "매출채권회전율", value: turnover }
         ], !basePeriod ? "해당 연도 1분기 매출채권이 없어 계산하지 않았습니다." : !turnover ? "회전율이 0 또는 비어 있어 기간을 계산하지 않았습니다." : undefined);
@@ -1588,7 +1631,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         return createCalculationDetail("매출원가 / ((해당연도 1분기 재고자산 + 현재 분기 재고자산) / 2)", result, [
           { label: "매출원가", value: costOfSales },
           { label: formatPeriodInputLabel("기초 재고자산(해당연도 1분기)", basePeriod), value: baseInventory },
-          { label: formatPeriodInputLabel("기말 재고자산(현재 분기)", period), value: currentInventory },
+          { label: formatPeriodInputLabel("기말 재고자산(현재 분기)", period), value: currentInventory, components: getClassifiedMetricBreakdown(current, period.key, ["재고자산"]) },
           { label: "평균재고자산", value: averageInventory }
         ], !basePeriod ? "해당 연도 1분기 재고자산이 없어 계산하지 않았습니다." : averageInventory === 0 ? "평균재고자산이 0이라 회전율을 계산하지 않았습니다." : undefined);
       }
@@ -1613,7 +1656,7 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         return createCalculationDetail("365 / 재고자산회전율", result, [
           { label: "매출원가", value: costOfSales },
           { label: formatPeriodInputLabel("기초 재고자산(해당연도 1분기)", basePeriod), value: baseInventory },
-          { label: formatPeriodInputLabel("기말 재고자산(현재 분기)", period), value: currentInventory },
+          { label: formatPeriodInputLabel("기말 재고자산(현재 분기)", period), value: currentInventory, components: getClassifiedMetricBreakdown(current, period.key, ["재고자산"]) },
           { label: "평균재고자산", value: averageInventory },
           { label: "재고자산회전율", value: turnover }
         ], !basePeriod ? "해당 연도 1분기 재고자산이 없어 계산하지 않았습니다." : !turnover ? "회전율이 0 또는 비어 있어 기간을 계산하지 않았습니다." : undefined);
