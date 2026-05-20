@@ -17,6 +17,9 @@ export type StatementMatrixRow = {
   accountName: string;
   canonicalKey: string;
   sourceCanonicalKey?: string;
+  // 분류DB 매칭으로 확정된 계정 code. 보고서·breakdown이 이 code로
+  // 결과물DB 묶음을 직접 찾는다. 옛 데이터엔 없을 수 있어 optional.
+  code?: number | null;
   values: Record<string, number | null>;
 };
 
@@ -68,8 +71,8 @@ export type SavedQuarterSnapshot = {
   quarterKey: string;
   quarterLabel: string;
   savedAt: string;
-  rawStatementRows: Array<{ signFlag: 0 | 1; section: string; sectionKey: string; accountName: string; canonicalKey: string; value: number | null }>;
-  adjustedStatementRows: Array<{ signFlag: 0 | 1; section: string; sectionKey: string; accountName: string; canonicalKey: string; value: number | null }>;
+  rawStatementRows: Array<{ signFlag: 0 | 1; section: string; sectionKey: string; accountName: string; canonicalKey: string; code?: number | null; value: number | null }>;
+  adjustedStatementRows: Array<{ signFlag: 0 | 1; section: string; sectionKey: string; accountName: string; canonicalKey: string; code?: number | null; value: number | null }>;
   source: {
     pastedText: string;
     tolerance: number;
@@ -94,6 +97,7 @@ type RowMeta = {
   canonicalKey: string;
   signFlag: 0 | 1;
   signCode: SignCode;
+  code: number | null;
   sourceCol: number;
 };
 
@@ -406,7 +410,8 @@ function resolveRowMeta(
     // Use resolveSign so live catalog + minus-keyword safety net both apply
     // here too — otherwise the reporting path would silently default to + for
     // any unmatched account, even though the validator panel handles it now.
-    let signCode = resolveSign(accountName, logicConfig, section, catalogLookup).sign;
+    const classification = resolveSign(accountName, logicConfig, section, catalogLookup);
+    let signCode = classification.sign;
     if (LOSS_ACCOUNTS.has(accountName.trim())) {
       signCode = 1;
     }
@@ -429,6 +434,7 @@ function resolveRowMeta(
           canonicalKey: resolveCanonicalAccountKey(accountName, sectionKey, classificationGroups),
           signFlag: signCode === 1 ? 1 : 0,
           signCode,
+          code: classification.code,
           sourceCol: index
         } satisfies RowMeta;
   });
@@ -462,6 +468,7 @@ function buildStatementRows(
         accountName: meta.accountName,
         canonicalKey: meta.canonicalKey,
         sourceCanonicalKey: meta.canonicalKey,
+        code: meta.code,
         values
       } satisfies StatementMatrixRow;
     });
@@ -1888,6 +1895,7 @@ export function buildQuarterSnapshots(args: {
       sectionKey: row.sectionKey,
       accountName: row.accountName,
       canonicalKey: row.canonicalKey,
+      code: row.code ?? null,
       value: row.values[period.key] ?? null
     })),
     adjustedStatementRows: reporting.adjustedStatementRows.map((row) => ({
@@ -1896,6 +1904,7 @@ export function buildQuarterSnapshots(args: {
       sectionKey: row.sectionKey,
       accountName: row.accountName,
       canonicalKey: row.canonicalKey,
+      code: row.code ?? null,
       value: row.values[period.key] ?? null
     })),
     source: {
@@ -1982,6 +1991,7 @@ export function buildCompanyReport(snapshots: SavedQuarterSnapshot[], activeClas
             accountName: canonicalKey,
             canonicalKey,
             sourceCanonicalKey: selectedRows[0].canonicalKey,
+            code: selectedRows[0].code ?? null,
             values: Object.fromEntries(periods.map((period) => [period.key, null]))
           });
         }

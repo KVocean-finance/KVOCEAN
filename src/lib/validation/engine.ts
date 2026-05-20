@@ -335,36 +335,51 @@ function normalizeLookupKeyLocal(s: string) {
  * sectionName disambiguates aliases that exist in multiple groups
  * (e.g. "전기오류수정손실" appears in both 자본 and 영업외비용).
  */
+/**
+ * OCR 계정명 → 분류DB 매칭. 부호(sign)와 code를 함께 돌려준다.
+ * 보고서·breakdown이 이 code로 결과물DB 묶음을 직접 찾아 합산하므로,
+ * 이름 목록을 매번 선형 순회할 필요가 없다.
+ *
+ * 시드(분류DB 정답표)를 먼저 본다 — entry에 code가 있다. catalog stored에
+ * 자식 alias가 끼어들어 시드와 충돌하면 시드가 이긴다. 시드에 없는 alias만
+ * catalog로 fallback (사용자가 분류DB에서 추가한 OCR 이름 변형 등).
+ */
+export function resolveAccountClassification(
+  name: string,
+  sectionName?: string,
+  catalogLookup?: Map<string, CatalogAliasMatch[]>
+): { sign: SignCode; code: number | null } | null {
+  const seedEntry = findEntryByAlias(name, sectionName);
+  if (seedEntry) return { sign: seedEntry.sign as SignCode, code: seedEntry.code };
+
+  if (catalogLookup) {
+    const candidates = catalogLookup.get(normalizeLookupKeyLocal(name));
+    if (candidates && candidates.length > 0) {
+      let pick = candidates[0];
+      if (candidates.length > 1 && sectionName) {
+        const hint = normalizeLookupKeyLocal(sectionName);
+        pick = candidates.find((c) => normalizeLookupKeyLocal(c.middleCategory) === hint)
+          ?? candidates.find((c) => normalizeLookupKeyLocal(c.majorCategory) === hint)
+          ?? candidates.find((c) => normalizeLookupKeyLocal(c.smallCategory) === hint)
+          ?? candidates[0];
+      }
+      // groupId는 catalog 그룹 식별자 — 시드 기반 그룹이면 7자리 code 문자열.
+      const parsedCode = Number(pick.groupId);
+      return { sign: pick.sign, code: Number.isFinite(parsedCode) && parsedCode > 0 ? parsedCode : null };
+    }
+  }
+  if (name.includes("_양수") || name.endsWith("양수")) return { sign: 0, code: null };
+  if (name.includes("_음수") || name.endsWith("음수")) return { sign: 1, code: null };
+  return null;
+}
+
 export function inferSignFromName(
   name: string,
   _logicConfig: LogicConfig,
   sectionName?: string,
   catalogLookup?: Map<string, CatalogAliasMatch[]>
 ): SignCode | null {
-  // 시드(분류DB 정답표)를 먼저 본다. catalog stored에 LEGACY_PARENT_GROUPS의
-  // 자식 alias가 끼어들어 시드와 충돌하면 시드가 이긴다 — 분류DB 화면에 보이는
-  // 부호와 검증 부호가 항상 일치하도록 보장.
-  const seedEntry = findEntryByAlias(name, sectionName);
-  if (seedEntry) return seedEntry.sign as SignCode;
-  // 시드에 없는 alias만 catalog로 fallback (사용자가 분류DB에서 추가한
-  // OCR 이름 변형 등).
-  if (catalogLookup) {
-    const candidates = catalogLookup.get(normalizeLookupKeyLocal(name));
-    if (candidates && candidates.length > 0) {
-      if (candidates.length === 1 || !sectionName) return candidates[0].sign;
-      const hint = normalizeLookupKeyLocal(sectionName);
-      const byMiddle = candidates.find((c) => normalizeLookupKeyLocal(c.middleCategory) === hint);
-      if (byMiddle) return byMiddle.sign;
-      const byMajor = candidates.find((c) => normalizeLookupKeyLocal(c.majorCategory) === hint);
-      if (byMajor) return byMajor.sign;
-      const bySmall = candidates.find((c) => normalizeLookupKeyLocal(c.smallCategory) === hint);
-      if (bySmall) return bySmall.sign;
-      return candidates[0].sign;
-    }
-  }
-  if (name.includes("_양수") || name.endsWith("양수")) return 0;
-  if (name.includes("_음수") || name.endsWith("음수")) return 1;
-  return null;
+  return resolveAccountClassification(name, sectionName, catalogLookup)?.sign ?? null;
 }
 
 /**
@@ -379,13 +394,13 @@ export function inferSignFromName(
  */
 export function resolveSign(
   name: string,
-  logicConfig: LogicConfig,
+  _logicConfig: LogicConfig,
   sectionName?: string,
   catalogLookup?: Map<string, CatalogAliasMatch[]>
-): { sign: SignCode; matched: boolean } {
-  const direct = inferSignFromName(name, logicConfig, sectionName, catalogLookup);
-  if (direct !== null) return { sign: direct, matched: true };
-  return { sign: 0, matched: false };
+): { sign: SignCode; matched: boolean; code: number | null } {
+  const result = resolveAccountClassification(name, sectionName, catalogLookup);
+  if (result !== null) return { sign: result.sign, matched: true, code: result.code };
+  return { sign: 0, matched: false, code: null };
 }
 
 function getAccountValue(
