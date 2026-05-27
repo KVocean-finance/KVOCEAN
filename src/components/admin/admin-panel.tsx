@@ -227,7 +227,7 @@ export function AdminPanel({ initialUsers }: { initialUsers: AllowedUser[] }) {
                       fontWeight: 700,
                       padding: "0.1rem 0.45rem",
                       borderRadius: 6,
-                      background: `rgba(${ROLE_COLORS[user.role]}, 0.1)`,
+                      background: `${ROLE_COLORS[user.role]}15`,
                       color: ROLE_COLORS[user.role],
                       border: `1px solid ${ROLE_COLORS[user.role]}30`,
                       letterSpacing: "0.02em",
@@ -307,8 +307,8 @@ export function AdminPanel({ initialUsers }: { initialUsers: AllowedUser[] }) {
               </span>
               <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
                 {role === "creator" && "모든 기능에 접근 가능. 데이터 삭제 포함. 계정 수정 불가."}
-                {role === "admin" && "계정 관리 페이지 접근 가능. 앱 내 모든 탭 수정 가능. 데이터 삭제는 제작자만 가능."}
-                {role === "manager" && "OCR검증, 데이터, 결과물 탭 사용 가능. 1-1, 3-1, 3-2, 4번 탭 및 데이터 삭제 불가."}
+                {role === "admin" && "계정 추가·권한변경·삭제 가능 (제작자 계정 제외). 앱 내 모든 탭 수정 가능. 데이터 삭제는 제작자만 가능."}
+                {role === "manager" && "OCR검증, 데이터, 결과물, 4-1 결과물DB 탭 사용 가능. 1-1, 3-1, 4번 탭 및 데이터 삭제 불가."}
               </span>
             </div>
           ))}
