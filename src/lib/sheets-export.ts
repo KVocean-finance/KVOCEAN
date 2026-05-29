@@ -707,15 +707,24 @@ export function buildClassificationDbResetTab(
     ]);
   }
 
-  // 대분류 → 중분류 → 항목명 순 정렬.
+  // 대분류 → 중분류 → 항목명 순 정렬. 대분류·중분류는 회계 표 순서를
+  // 따른다 (가나다 순이 아님). 목록에 없는 값은 맨 뒤로.
   // 헤더: [코드(0), 대분류(1), 중분류(2), 소분류(3), 세분류(4), 항목명(5), 부호(6), 출처(7)]
+  const MAJOR_ORDER = ["자산", "부채", "자본", "매출액", "매출원가", "판관비", "영업외수익", "영업외비용"];
+  const MIDDLE_ORDER = ["유동자산", "비유동자산", "유동부채", "비유동부채", "기타", "매출액", "매출원가", "판매비와관리비", "영업외수익", "영업외비용"];
+  const rankOf = (list: string[], v: string) => {
+    const i = list.indexOf(v);
+    return i === -1 ? list.length : i;
+  };
   rows.sort((a, b) => {
     const aMajor = String(a[1] ?? "");
     const bMajor = String(b[1] ?? "");
-    if (aMajor !== bMajor) return aMajor.localeCompare(bMajor, "ko");
+    const majorDiff = rankOf(MAJOR_ORDER, aMajor) - rankOf(MAJOR_ORDER, bMajor);
+    if (majorDiff !== 0) return majorDiff;
     const aMid = String(a[2] ?? "");
     const bMid = String(b[2] ?? "");
-    if (aMid !== bMid) return aMid.localeCompare(bMid, "ko");
+    const midDiff = rankOf(MIDDLE_ORDER, aMid) - rankOf(MIDDLE_ORDER, bMid);
+    if (midDiff !== 0) return midDiff;
     return String(a[5] ?? "").localeCompare(String(b[5] ?? ""), "ko");
   });
 
