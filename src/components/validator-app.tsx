@@ -45,6 +45,7 @@ import {
   collectDistinctQuarters as collectSheetsQuarters,
   toSheetTabName,
   buildClassificationDbTab,
+  buildClassificationDbResetTab,
   type SheetCellValue,
   type AccountOccurrence
 } from "@/lib/sheets-export";
@@ -115,7 +116,8 @@ function parseDatasetApiResponse(raw: DatasetApiResponse) {
  */
 function buildSheetsSyncPayload(
   savedDatasets: SavedQuarterSnapshot[],
-  classificationGroups: ClassificationGroups
+  classificationGroups: ClassificationGroups,
+  classificationCatalog?: ClassificationCatalogGroup[]
 ): { quarterTabs: Array<{ tabName: string; headers: string[]; rows: SheetCellValue[][] }> } {
   const byCompany = new Map<string, SavedQuarterSnapshot[]>();
   for (const d of savedDatasets) {
@@ -135,8 +137,10 @@ function buildSheetsSyncPayload(
   const headers = buildSheetsHeaderRow();
 
   // 분류DB 탭 — collect OCR account occurrences across all saved datasets.
+  // catalog가 있으면 사용자의 런타임 편집(alias 이동/추가)을 반영해서 시트가
+  // 화면 표와 정확히 일치하도록 한다.
   const accountOccurrences = collectAccountOccurrences(savedDatasets);
-  const classificationDbTab = buildClassificationDbTab(accountOccurrences);
+  const classificationDbTab = buildClassificationDbTab(accountOccurrences, classificationCatalog);
 
   const quarterTabs = quarters.map((q) => ({
     tabName: toSheetTabName(q.key),
@@ -1175,12 +1179,19 @@ function ClassificationTableViewInner({
   accountEntries,
   catalog,
   onOverridesChange,
-  initialFilters
+  initialFilters,
+  sheetsSync
 }: {
   accountEntries: SectionAccountDbEntry[];
   catalog: ClassificationCatalogGroup[];
   onOverridesChange?: (overrides: Map<string, AliasOverride>) => void;
   initialFilters?: { showOnlyUnclassified?: boolean; showOnlyEncountered?: boolean };
+  sheetsSync?: {
+    onClick: () => void;
+    onResetClick?: () => void;
+    status: "idle" | "syncing" | "ok" | "error" | "disabled";
+    message?: string;
+  };
 }) {
   const baseRows = useMemo(() => buildClassificationTableRows(accountEntries, catalog), [accountEntries, catalog]);
   const options = useMemo(() => getClassificationOptions(), []);
@@ -1404,7 +1415,39 @@ function ClassificationTableViewInner({
             </button>
           </div>
         ) : (
-          <button type="button" className="ghost-button" onClick={enterEditMode}>편집모드</button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {sheetsSync && (
+              <>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={sheetsSync.onClick}
+                  disabled={sheetsSync.status === "syncing"}
+                  title="현재 분류DB(편집/저장된 상태) 그대로 구글시트 '분류DB' 탭에 덮어쓰기"
+                >
+                  {sheetsSync.status === "syncing" ? "동기화 중..." : "구글시트로 보내기"}
+                </button>
+                {sheetsSync.onResetClick && (
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={sheetsSync.onResetClick}
+                    disabled={sheetsSync.status === "syncing"}
+                    title="저장된 OCR 항목들을 seed의 대분류/중분류/부호만 채워 '분류DB_재설정' 탭에 새로 쓰기 (소분류·세분류는 모두 미분류)"
+                  >
+                    분류DB 재설정 시트
+                  </button>
+                )}
+                {sheetsSync.status !== "idle" && sheetsSync.status !== "syncing" && sheetsSync.status !== "disabled" && (
+                  <span className={`sheets-sync-status sheets-sync-${sheetsSync.status}`}>
+                    {sheetsSync.status === "ok" && (sheetsSync.message ?? "동기화 완료")}
+                    {sheetsSync.status === "error" && (sheetsSync.message ?? "동기화 실패")}
+                  </span>
+                )}
+              </>
+            )}
+            <button type="button" className="ghost-button" onClick={enterEditMode}>편집모드</button>
+          </div>
         )}
       </div>
       {editMode && (
@@ -2478,7 +2521,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     sheetsAutoSyncInitializedRef.current = true;
 
     const timeout = window.setTimeout(() => {
-      const payload = buildSheetsSyncPayload(savedDatasets, classificationGroups);
+      const payload = buildSheetsSyncPayload(savedDatasets, classificationGroups, classificationCatalog);
       if (!payload.quarterTabs.length) return;
       setSheetsSyncState({ status: "syncing", message: "페이지 로드 → 시트 자동 동기화 중..." });
       postSheetsSync(payload)
@@ -2934,7 +2977,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       setActiveTab("data");
 
       // Use freshly-saved data (nextSaved) — React state may not have propagated yet.
-      const sheetsPayload = buildSheetsSyncPayload(nextSaved, classificationGroups);
+      const sheetsPayload = buildSheetsSyncPayload(nextSaved, classificationGroups, classificationCatalog);
       if (sheetsPayload.quarterTabs.length) {
         setSheetsSyncState({ status: "syncing", message: "저장 후 시트 동기화 중..." });
         postSheetsSync(sheetsPayload)
@@ -2987,10 +3030,61 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     return data?.error ?? "구글시트 동기화 실패";
   }
 
+  async function syncClassificationDbOnly() {
+    setSheetsSyncState({ status: "syncing", message: "분류DB 동기화 중..." });
+    try {
+      const accountOccurrences = collectAccountOccurrences(savedDatasets);
+      const classificationDbTab = buildClassificationDbTab(accountOccurrences, classificationCatalog);
+      const data = await postSheetsSync({ quarterTabs: [classificationDbTab] });
+      if (data?.ok) {
+        setSheetsSyncState({
+          status: "ok",
+          message: `분류DB 시트 갱신 완료 (행 ${data.rowsTotal ?? classificationDbTab.rows.length})`
+        });
+        window.setTimeout(
+          () => setSheetsSyncState((prev) => prev.status === "ok" ? { status: "idle" } : prev),
+          4000
+        );
+      } else {
+        setSheetsSyncState({ status: "error", message: describeSheetsError(data) });
+      }
+    } catch (err) {
+      setSheetsSyncState({
+        status: "error",
+        message: err instanceof Error ? err.message : "구글시트 동기화 실패"
+      });
+    }
+  }
+
+  async function syncClassificationDbResetOnly() {
+    setSheetsSyncState({ status: "syncing", message: "분류DB 재설정 시트 생성 중..." });
+    try {
+      const resetTab = buildClassificationDbResetTab(savedDatasets);
+      const data = await postSheetsSync({ quarterTabs: [resetTab] });
+      if (data?.ok) {
+        setSheetsSyncState({
+          status: "ok",
+          message: `분류DB_재설정 시트 갱신 완료 (행 ${data.rowsTotal ?? resetTab.rows.length})`
+        });
+        window.setTimeout(
+          () => setSheetsSyncState((prev) => prev.status === "ok" ? { status: "idle" } : prev),
+          4000
+        );
+      } else {
+        setSheetsSyncState({ status: "error", message: describeSheetsError(data) });
+      }
+    } catch (err) {
+      setSheetsSyncState({
+        status: "error",
+        message: err instanceof Error ? err.message : "구글시트 동기화 실패"
+      });
+    }
+  }
+
   async function bulkSyncSheets() {
     setSheetsSyncState({ status: "syncing", message: "전체 동기화 중..." });
     try {
-      const payload = buildSheetsSyncPayload(savedDatasets, classificationGroups);
+      const payload = buildSheetsSyncPayload(savedDatasets, classificationGroups, classificationCatalog);
       if (!payload.quarterTabs.length) {
         setSheetsSyncState({ status: "error", message: "저장된 분기 데이터가 없습니다." });
         return;
@@ -4998,6 +5092,12 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
                   accountEntries={accountDictionaryEntries}
                   catalog={classificationCatalog}
                   onOverridesChange={handleClassificationOverrides}
+                  sheetsSync={{
+                    onClick: syncClassificationDbOnly,
+                    onResetClick: syncClassificationDbResetOnly,
+                    status: sheetsSyncState.status,
+                    message: sheetsSyncState.message
+                  }}
                 />
               </section>
             </>
@@ -5113,6 +5213,12 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
                   accountEntries={accountDictionaryEntries}
                   catalog={classificationCatalog}
                   onOverridesChange={handleClassificationOverrides}
+                  sheetsSync={{
+                    onClick: syncClassificationDbOnly,
+                    onResetClick: syncClassificationDbResetOnly,
+                    status: sheetsSyncState.status,
+                    message: sheetsSyncState.message
+                  }}
                 />
               </section>
             </>

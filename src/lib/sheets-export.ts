@@ -1,5 +1,10 @@
-import type { ReportingModel } from "@/lib/validation/report";
-import { CLASSIFICATION_ENTRIES, findEntryByAlias } from "@/lib/validation/defaults";
+import type { ReportingModel, SavedQuarterSnapshot } from "@/lib/validation/report";
+import {
+  CLASSIFICATION_ENTRIES,
+  findEntryByAlias,
+  findEntryByCode,
+  type ClassificationCatalogGroup
+} from "@/lib/validation/defaults";
 
 /**
  * Exact set of metrics to push to the sheet — amount only (no ratio/growth).
@@ -481,12 +486,19 @@ function normalizeLookup(s: string): string {
 }
 
 /**
- * Build the 분류DB tab payload. One row per seed alias (so every standard
- * classification is visible) plus extra rows for OCR accounts that don't match
- * any seed alias (사용자가 시트에서 직접 분류해 줄 미분류 영역).
+ * Build the 분류DB tab payload.
+ *
+ * - When `catalog` is provided: rows mirror the runtime catalog (so 분류DB 탭
+ *   화면의 편집사항 — alias 이동/추가 — 이 시트에도 그대로 반영). 이 경로가
+ *   사용자가 보고 있는 표와 동일.
+ * - When `catalog` is omitted: falls back to seed-only rows. (호환용 / 카탈로그
+ *   로드 전 호출 대비)
+ *
+ * 마지막으로 OCR 계정명 중 어디에도 매칭 안 된 것은 미분류 행으로 추가.
  */
 export function buildClassificationDbTab(
-  accountOccurrences: AccountOccurrence[]
+  accountOccurrences: AccountOccurrence[],
+  catalog?: ClassificationCatalogGroup[]
 ): { tabName: string; headers: string[]; rows: SheetCellValue[][] } {
   // Group occurrences by normalized account name for lookup.
   const occurrencesByName = new Map<string, AccountSource[]>();
@@ -501,28 +513,65 @@ export function buildClassificationDbTab(
   const matchedAliasKeys = new Set<string>();
   const rows: SheetCellValue[][] = [];
 
-  // Seed-driven rows
-  for (const entry of CLASSIFICATION_ENTRIES) {
-    const signLabel = entry.sign === 1 ? "−" : "+";
-    const aliases = entry.aliases.length ? entry.aliases : [entry.세분류];
-    for (const alias of aliases) {
-      const aliasKey = normalizeLookup(alias);
-      matchedAliasKeys.add(aliasKey);
-      const sources = occurrencesByName.get(aliasKey) ?? [];
-      rows.push([
-        entry.code,
-        entry.대분류,
-        entry.중분류,
-        entry.소분류,
-        entry.세분류,
-        alias,
-        signLabel,
-        formatSourceCell(sources)
-      ]);
+  if (catalog && catalog.length) {
+    // Catalog-driven rows — mirrors ClassificationTableViewInner의
+    // buildClassificationTableRows: catalog 그룹별로 seed에서 대/중/소/세 찾고,
+    // canonicalKey + group.aliases 합쳐 행 생성. seed-wins 규칙으로 중복 alias
+    // 가 다른 seed home에 속하면 스킵.
+    const seenRowKeys = new Set<string>();
+    for (const group of catalog) {
+      const code = parseInt(group.groupId, 10);
+      if (!Number.isFinite(code)) continue;
+      const seed = findEntryByCode(code);
+      if (!seed) continue;
+      const signLabel = seed.sign === 1 ? "−" : "+";
+      const aliasList: string[] = [seed.세분류, ...group.aliases];
+      for (const alias of aliasList) {
+        const aliasKey = normalizeLookup(alias);
+        if (!aliasKey) continue;
+        const seedHome = findEntryByAlias(alias);
+        if (seedHome && seedHome.code !== seed.code) continue;
+        const rowKey = `${code}::${aliasKey}`;
+        if (seenRowKeys.has(rowKey)) continue;
+        seenRowKeys.add(rowKey);
+        matchedAliasKeys.add(aliasKey);
+        const sources = occurrencesByName.get(aliasKey) ?? [];
+        rows.push([
+          seed.code,
+          seed.대분류,
+          seed.중분류,
+          seed.소분류,
+          seed.세분류,
+          alias,
+          signLabel,
+          formatSourceCell(sources)
+        ]);
+      }
+    }
+  } else {
+    // Seed-driven rows (fallback)
+    for (const entry of CLASSIFICATION_ENTRIES) {
+      const signLabel = entry.sign === 1 ? "−" : "+";
+      const aliases = entry.aliases.length ? entry.aliases : [entry.세분류];
+      for (const alias of aliases) {
+        const aliasKey = normalizeLookup(alias);
+        matchedAliasKeys.add(aliasKey);
+        const sources = occurrencesByName.get(aliasKey) ?? [];
+        rows.push([
+          entry.code,
+          entry.대분류,
+          entry.중분류,
+          entry.소분류,
+          entry.세분류,
+          alias,
+          signLabel,
+          formatSourceCell(sources)
+        ]);
+      }
     }
   }
 
-  // 미분류 — OCR 계정명 중 시드 어느 alias와도 매칭 안 된 것
+  // 미분류 — OCR 계정명 중 위 행들과 매칭 안 된 것
   for (const [normKey, sources] of occurrencesByName.entries()) {
     if (matchedAliasKeys.has(normKey)) continue;
     const accountName = sources[0]
@@ -556,4 +605,92 @@ export function buildClassificationDbTab(
  */
 export function lookupClassification(accountName: string) {
   return findEntryByAlias(accountName);
+}
+
+// ===========================================================================
+// 분류DB 재설정 시트 — 저장된 스냅샷의 값을 그대로 가져온다.
+// 항목명(accountName)과 부호(signFlag)는 저장된 값 그대로,
+// 대분류/중분류는 저장된 code로 seed에서 룩업.
+// 소분류/세분류는 "미분류"로 비워서 사용자가 처음부터 다시 분류 세팅.
+// ===========================================================================
+
+export const CLASSIFICATION_DB_RESET_TAB_NAME = "분류DB_재설정";
+export const CLASSIFICATION_DB_RESET_HEADERS = [
+  "코드", "대분류", "중분류", "소분류", "세분류", "항목명", "부호", "출처"
+] as const;
+
+type ResetEntry = {
+  accountName: string;
+  signFlag: 0 | 1;
+  code: number | null;
+  sources: AccountSource[];
+};
+
+export function buildClassificationDbResetTab(
+  savedDatasets: SavedQuarterSnapshot[]
+): { tabName: string; headers: string[]; rows: SheetCellValue[][] } {
+  // 같은 accountName이 여러 회사/분기에 나오면 한 행으로 묶고 출처만 누적.
+  // 첫 번째 등장의 signFlag/code를 사용 (저장된 값 기준).
+  const byName = new Map<string, ResetEntry>();
+  for (const dataset of savedDatasets) {
+    for (const row of dataset.adjustedStatementRows) {
+      const name = (row.accountName ?? "").trim();
+      if (!name) continue;
+      const source = { companyName: dataset.companyName, quarterLabel: dataset.quarterLabel };
+      const existing = byName.get(name);
+      if (existing) {
+        const dup = existing.sources.some(
+          (s) => s.companyName === source.companyName && s.quarterLabel === source.quarterLabel
+        );
+        if (!dup) existing.sources.push(source);
+      } else {
+        byName.set(name, {
+          accountName: name,
+          signFlag: row.signFlag,
+          code: typeof row.code === "number" ? row.code : null,
+          sources: [source]
+        });
+      }
+    }
+  }
+
+  const rows: SheetCellValue[][] = [];
+  for (const entry of byName.values()) {
+    const seed = entry.code !== null ? findEntryByCode(entry.code) : findEntryByAlias(entry.accountName);
+    const 대분류 = seed?.대분류 ?? "";
+    const 중분류 = seed?.중분류 ?? "";
+    const signLabel = entry.signFlag === 1 ? "−" : "+";
+
+    rows.push([
+      "",            // 코드 — 비움
+      대분류,
+      중분류,
+      "",            // 소분류 — 비움
+      "",            // 세분류 — 비움
+      entry.accountName,
+      signLabel,
+      formatSourceCell(entry.sources)
+    ]);
+  }
+
+  // 대분류 → 중분류 → 항목명 순으로 정렬. 대/중 빈칸인 행은 맨 밑.
+  // 헤더: [코드(0), 대분류(1), 중분류(2), 소분류(3), 세분류(4), 항목명(5), 부호(6), 출처(7)]
+  rows.sort((a, b) => {
+    const aMajor = String(a[1] ?? "");
+    const bMajor = String(b[1] ?? "");
+    const aHas = aMajor ? 0 : 1;
+    const bHas = bMajor ? 0 : 1;
+    if (aHas !== bHas) return aHas - bHas;
+    if (aMajor !== bMajor) return aMajor.localeCompare(bMajor, "ko");
+    const aMid = String(a[2] ?? "");
+    const bMid = String(b[2] ?? "");
+    if (aMid !== bMid) return aMid.localeCompare(bMid, "ko");
+    return String(a[5] ?? "").localeCompare(String(b[5] ?? ""), "ko");
+  });
+
+  return {
+    tabName: CLASSIFICATION_DB_RESET_TAB_NAME,
+    headers: [...CLASSIFICATION_DB_RESET_HEADERS],
+    rows
+  };
 }
