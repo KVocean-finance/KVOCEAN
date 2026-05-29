@@ -524,7 +524,8 @@ export function buildClassificationDbTab(
       if (!Number.isFinite(code)) continue;
       const seed = findEntryByCode(code);
       if (!seed) continue;
-      const signLabel = seed.sign === 1 ? "−" : "+";
+      // '+ → 시트가 수식으로 오해해 #ERROR! 뜨는 거 막기 위한 텍스트 강제 prefix.
+      const signLabel = seed.sign === 1 ? "−" : "'+";
       const aliasList: string[] = [seed.세분류, ...group.aliases];
       for (const alias of aliasList) {
         const aliasKey = normalizeLookup(alias);
@@ -551,7 +552,8 @@ export function buildClassificationDbTab(
   } else {
     // Seed-driven rows (fallback)
     for (const entry of CLASSIFICATION_ENTRIES) {
-      const signLabel = entry.sign === 1 ? "−" : "+";
+      // '+ → 시트가 수식으로 오해해 #ERROR! 뜨는 거 막기 위한 텍스트 강제 prefix.
+      const signLabel = entry.sign === 1 ? "−" : "'+";
       const aliases = entry.aliases.length ? entry.aliases : [entry.세분류];
       for (const alias of aliases) {
         const aliasKey = normalizeLookup(alias);
@@ -661,7 +663,8 @@ export function buildClassificationDbResetTab(
     const seed = entry.code !== null ? findEntryByCode(entry.code) : findEntryByAlias(entry.accountName);
     if (!seed) continue;
     // 부호는 seed의 한 값으로 통일 — 회사별 signFlag 디테일 무시.
-    const signLabel = seed.sign === 1 ? "−" : "+";
+    // '+ → 시트가 수식으로 오해해 #ERROR! 뜨는 거 막기 위한 텍스트 강제 prefix.
+    const signLabel = seed.sign === 1 ? "−" : "'+";
 
     rows.push([
       "",            // 코드 — 비움 (사용자가 새 분류 작업하며 채울 자리)
