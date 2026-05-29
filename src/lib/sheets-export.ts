@@ -610,10 +610,15 @@ export function lookupClassification(accountName: string) {
 }
 
 // ===========================================================================
-// 분류DB 재설정 시트 — 저장된 스냅샷의 값을 그대로 가져온다.
-// 항목명(accountName)과 부호(signFlag)는 저장된 값 그대로,
-// 대분류/중분류는 저장된 code로 seed에서 룩업.
-// 소분류/세분류는 "미분류"로 비워서 사용자가 처음부터 다시 분류 세팅.
+// 분류DB 재설정 시트 — 저장된 스냅샷의 cat(=section) + accountName + signFlag
+// 을 그대로 읽어 대분류/중분류/항목명/부호 를 채운다. 시드 룩업 없음.
+//
+// 저장된 row 한 줄에 [signFlag, section, accountName] 이 들어있고:
+//   - 중분류 = section (예: "유동자산", "매출액", "판매비와관리비")
+//   - 항목명 = accountName (예: "현금및현금성자산", "직원급여")
+//   - 대분류 = section 그룹 매핑 (자산/부채/자본/손익)
+//
+// 재무상태표·손익계산서 cat 행들은 상위 소계라서 시트에서 제외.
 // ===========================================================================
 
 export const CLASSIFICATION_DB_RESET_TAB_NAME = "분류DB_재설정";
@@ -621,23 +626,52 @@ export const CLASSIFICATION_DB_RESET_HEADERS = [
   "코드", "대분류", "중분류", "소분류", "세분류", "항목명", "부호", "출처"
 ] as const;
 
+// section → 대분류 매핑. 시드 컨벤션을 따라:
+//   BS는 통합 (유동/비유동 → 자산·부채), P&L은 섹션 그대로 (매출액/매출원가/
+//   판관비/영업외수익/영업외비용 각각 별도 대분류).
+// "기타" 는 OCR 카테고리 행에서 자본 leaf 항목들(자본금/주식발행초과금/
+//   기타포괄손익누계액/미처리결손금 등) 위에 붙는 컨벤션 → 자본으로 본다.
+// 회사명/날짜 같은 메타 컬럼은 buildStatementRows 단계에서 이미 걸러져
+//   스냅샷 row에 안 들어옴.
+const SECTION_TO_MAJOR_CATEGORY: Record<string, string> = {
+  "유동자산": "자산",
+  "비유동자산": "자산",
+  "유동부채": "부채",
+  "비유동부채": "부채",
+  "기타": "자본",
+  "매출액": "매출액",
+  "매출원가": "매출원가",
+  "판매비와관리비": "판관비",
+  "판관비": "판관비",
+  "영업비용": "판관비",
+  "영업외수익": "영업외수익",
+  "영업외비용": "영업외비용"
+};
+
 type ResetEntry = {
   accountName: string;
+  대분류: string;
+  중분류: string;
   signFlag: 0 | 1;
-  code: number | null;
   sources: AccountSource[];
 };
 
 export function buildClassificationDbResetTab(
   savedDatasets: SavedQuarterSnapshot[]
 ): { tabName: string; headers: string[]; rows: SheetCellValue[][] } {
-  // 같은 accountName이 여러 회사/분기에 나오면 한 행으로 묶고 출처만 누적.
-  // 첫 번째 등장의 signFlag/code를 사용 (저장된 값 기준).
+  // 같은 항목명이 여러 회사·분기에 나오면 한 행으로 묶고 출처만 누적.
+  // 첫 등장의 section / signFlag 를 그대로 사용 (사용자가 시트에서 수정 가능).
   const byName = new Map<string, ResetEntry>();
   for (const dataset of savedDatasets) {
     for (const row of dataset.adjustedStatementRows) {
       const name = (row.accountName ?? "").trim();
-      if (!name) continue;
+      const section = (row.section ?? "").trim();
+      if (!name || !section) continue;
+      // 재무상태표·손익계산서 cat = 상위 소계 행 (자산/부채/자본/유동자산/...
+      // 같은 합계 항목). 분류DB의 분류 대상이 아니므로 제외.
+      const major = SECTION_TO_MAJOR_CATEGORY[section];
+      if (!major) continue;
+
       const source = { companyName: dataset.companyName, quarterLabel: dataset.quarterLabel };
       const existing = byName.get(name);
       if (existing) {
@@ -648,8 +682,9 @@ export function buildClassificationDbResetTab(
       } else {
         byName.set(name, {
           accountName: name,
+          대분류: major,
+          중분류: section,
           signFlag: row.signFlag,
-          code: typeof row.code === "number" ? row.code : null,
           sources: [source]
         });
       }
@@ -658,18 +693,12 @@ export function buildClassificationDbResetTab(
 
   const rows: SheetCellValue[][] = [];
   for (const entry of byName.values()) {
-    // seed 매칭 우선: 저장된 code → seed, 없으면 별칭으로 시도.
-    // 둘 다 실패하면 (= 대분류/중분류를 알 수 없는 항목) 시트에서 제외.
-    const seed = entry.code !== null ? findEntryByCode(entry.code) : findEntryByAlias(entry.accountName);
-    if (!seed) continue;
-    // 부호는 seed의 한 값으로 통일 — 회사별 signFlag 디테일 무시.
     // '+ → 시트가 수식으로 오해해 #ERROR! 뜨는 거 막기 위한 텍스트 강제 prefix.
-    const signLabel = seed.sign === 1 ? "−" : "'+";
-
+    const signLabel = entry.signFlag === 1 ? "−" : "'+";
     rows.push([
-      "",            // 코드 — 비움 (사용자가 새 분류 작업하며 채울 자리)
-      seed.대분류,
-      seed.중분류,
+      "",            // 코드 — 비움 (사용자가 새 분류 작업하며 채움)
+      entry.대분류,
+      entry.중분류,
       "",            // 소분류 — 비움
       "",            // 세분류 — 비움
       entry.accountName,
