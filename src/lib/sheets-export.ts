@@ -656,15 +656,17 @@ export function buildClassificationDbResetTab(
 
   const rows: SheetCellValue[][] = [];
   for (const entry of byName.values()) {
+    // seed 매칭 우선: 저장된 code → seed, 없으면 별칭으로 시도.
+    // 둘 다 실패하면 (= 대분류/중분류를 알 수 없는 항목) 시트에서 제외.
     const seed = entry.code !== null ? findEntryByCode(entry.code) : findEntryByAlias(entry.accountName);
-    const 대분류 = seed?.대분류 ?? "";
-    const 중분류 = seed?.중분류 ?? "";
-    const signLabel = entry.signFlag === 1 ? "−" : "+";
+    if (!seed) continue;
+    // 부호는 seed의 한 값으로 통일 — 회사별 signFlag 디테일 무시.
+    const signLabel = seed.sign === 1 ? "−" : "+";
 
     rows.push([
-      "",            // 코드 — 비움
-      대분류,
-      중분류,
+      "",            // 코드 — 비움 (사용자가 새 분류 작업하며 채울 자리)
+      seed.대분류,
+      seed.중분류,
       "",            // 소분류 — 비움
       "",            // 세분류 — 비움
       entry.accountName,
@@ -673,14 +675,11 @@ export function buildClassificationDbResetTab(
     ]);
   }
 
-  // 대분류 → 중분류 → 항목명 순으로 정렬. 대/중 빈칸인 행은 맨 밑.
+  // 대분류 → 중분류 → 항목명 순 정렬.
   // 헤더: [코드(0), 대분류(1), 중분류(2), 소분류(3), 세분류(4), 항목명(5), 부호(6), 출처(7)]
   rows.sort((a, b) => {
     const aMajor = String(a[1] ?? "");
     const bMajor = String(b[1] ?? "");
-    const aHas = aMajor ? 0 : 1;
-    const bHas = bMajor ? 0 : 1;
-    if (aHas !== bHas) return aHas - bHas;
     if (aMajor !== bMajor) return aMajor.localeCompare(bMajor, "ko");
     const aMid = String(a[2] ?? "");
     const bMid = String(b[2] ?? "");
