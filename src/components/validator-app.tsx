@@ -41,7 +41,7 @@ import { RESULT_CLASSIFICATION, RESULT_BY_GROUP } from "@/lib/validation/result-
 import { type SharedStateResponse } from "@/lib/shared-state";
 import { AccountTreeMirror } from "@/components/account-tree-mirror";
 import { buildTreeCatalogLookupFromRows, buildTreeKeywordCodeSets } from "@/lib/validation/account-tree-adapter";
-import { parseAccountTree, type AccountTreeRow } from "@/lib/validation/account-tree";
+import { parseAccountTree, normalizeAccountName, type AccountTreeRow } from "@/lib/validation/account-tree";
 import {
   buildHeaderRow as buildSheetsHeaderRow,
   buildQuarterRows as buildSheetsQuarterRows,
@@ -50,7 +50,8 @@ import {
   buildClassificationDbTab,
   buildClassificationDbResetTab,
   type SheetCellValue,
-  type AccountOccurrence
+  type AccountOccurrence,
+  type AccountSource
 } from "@/lib/sheets-export";
 import {
   buildCompanyReport,
@@ -2309,6 +2310,8 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   const [sheetsSyncState, setSheetsSyncState] = useState<{ status: "idle" | "syncing" | "ok" | "error" | "disabled"; message?: string }>({ status: "idle" });
   // 계정트리 캐시 → 매칭용 lookup. 있으면 검증/점검이 옛 분류 대신 트리로 돈다.
   const [accountTreeLookup, setAccountTreeLookup] = useState<ReturnType<typeof buildTreeCatalogLookupFromRows> | null>(null);
+  // 트리 모든 노드 이름(leaf+구조노드) — OCR 섹션 총계줄(자산/매출액 등)을 미분류에서 거르는 용도.
+  const [accountTreeNodeNames, setAccountTreeNodeNames] = useState<Set<string>>(() => new Set());
   useEffect(() => {
     let cancelled = false;
     fetch("/api/classification-tree")
@@ -2316,6 +2319,13 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       .then((data) => {
         if (cancelled || !data?.ok || !Array.isArray(data.rows)) return;
         setAccountTreeLookup(buildTreeCatalogLookupFromRows(data.rows as AccountTreeRow[]));
+        const names = new Set<string>();
+        for (const r of (data.rows as AccountTreeRow[])) {
+          for (const label of [r.l1, r.l2, r.l3, r.l4, r.l5]) {
+            if (label) names.add(normalizeAccountName(label));
+          }
+        }
+        setAccountTreeNodeNames(names);
         // 묶음(변동비/인건비/차입금 …) 코드셋도 트리(13자리)로 교체 = 컷오버.
         // 이게 없으면 스냅샷은 트리코드인데 묶음셋은 레거시(7자리)라 묶음 합산이 0.
         if (Array.isArray(data.values) && data.values.length) {
@@ -2746,6 +2756,42 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     [pastedText, selectedCompany, tolerance, logicConfig, companyConfigs, pasteEdits, nameEdits, sessionSignFixes, classificationCatalog, accountTreeLookup]
   );
   const accountDictionaryEntries = useMemo(() => extractAccountDictionaryEntries(savedDatasets), [savedDatasets]);
+  // 4.분류DB 탭 출처·미분류: 저장 OCR 계정을 계정트리에 대조한다.
+  //  - sourcesByCode: 트리 코드별로 어느 회사·분기에서 그 계정이 나왔나(출처)
+  //  - unclassified : 트리 leaf에 이름이 없는 OCR 계정 = 미분류 (출처 동반)
+  const treeSourceData = useMemo(() => {
+    const sourcesByCode = new Map<string, AccountSource[]>();
+    const unclassified: AccountOccurrence[] = [];
+    const occurrences = collectAccountOccurrences(savedDatasets);
+    if (!accountTreeLookup) return { sourcesByCode, unclassified };
+    // OCR 섹션 이름(자산/매출액/판관비 등 총계 헤더) — 미분류로 안 친다.
+    const sectionNames = new Set<string>();
+    for (const ds of savedDatasets) {
+      for (const row of ds.adjustedStatementRows) {
+        if (row.sectionKey) sectionNames.add(normalizeAccountName(row.sectionKey));
+      }
+    }
+    const pushSources = (code: string, sources: AccountSource[]) => {
+      const list = sourcesByCode.get(code) ?? [];
+      for (const s of sources) {
+        if (!list.some((x) => x.companyName === s.companyName && x.quarterLabel === s.quarterLabel)) list.push(s);
+      }
+      sourcesByCode.set(code, list);
+    };
+    for (const occ of occurrences) {
+      const key = normalizeAccountName(occ.accountName);
+      const matches = accountTreeLookup.get(key);
+      if (matches && matches.length) {
+        for (const m of matches) pushSources(m.groupId, occ.sources);
+      } else if (accountTreeNodeNames.has(key) || sectionNames.has(key)) {
+        // 트리 구조노드(대/중/소분류) 또는 OCR 섹션 총계 헤더 — 분류 대상 아님.
+      } else {
+        unclassified.push(occ);
+      }
+    }
+    unclassified.sort((a, b) => b.sources.length - a.sources.length);
+    return { sourcesByCode, unclassified };
+  }, [savedDatasets, accountTreeLookup, accountTreeNodeNames]);
   const managedClassificationLookup = useMemo(
     () => buildManagedClassificationLookup(classificationCatalog),
     [classificationCatalog]
@@ -5210,8 +5256,8 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
                 <div className="section-title">
                   <div>
                     <span className="section-kicker">4. 분류DB</span>
-                    <h3>전체 분류 + 미분류 처리</h3>
-                    <p className="result-meta">표준 분류 카탈로그를 보고, 새로 들어온 OCR 항목 중 매칭 안 된 것(미분류)을 바로 분류합니다. 상단 `미분류만` 필터로 손볼 항목만 추려서 빠르게 처리 가능. 저장하면 다음 검증부터 자동 적용됩니다.</p>
+                    <h3>계정트리 + 미분류 처리</h3>
+                    <p className="result-meta">구글시트에서 동기화한 계정트리를 보고, 저장 데이터에서 나온 OCR 계정 중 트리에 없는 것(미분류)을 출처와 함께 확인합니다. 아래 트리 표에서 `미분류` 보기로 전환하면 손볼 항목만 빨간색으로 추려 보고, 시트에 추가해 분류하세요. 분류는 구글시트에서 하고 「시트에서 동기화」로 반영됩니다.</p>
                   </div>
                 </div>
               </section>
@@ -5275,7 +5321,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
               </section>
 
               <section className="config-card">
-                <AccountTreeMirror />
+                <AccountTreeMirror sourcesByCode={treeSourceData.sourcesByCode} unclassified={treeSourceData.unclassified} />
               </section>
             </>
           )}
