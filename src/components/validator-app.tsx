@@ -1180,7 +1180,8 @@ function ClassificationTableViewInner({
   catalog,
   onOverridesChange,
   initialFilters,
-  sheetsSync
+  sheetsSync,
+  treeSync
 }: {
   accountEntries: SectionAccountDbEntry[];
   catalog: ClassificationCatalogGroup[];
@@ -1190,6 +1191,11 @@ function ClassificationTableViewInner({
     onClick: () => void;
     onResetClick?: () => void;
     status: "idle" | "syncing" | "ok" | "error" | "disabled";
+    message?: string;
+  };
+  treeSync?: {
+    onClick: () => void;
+    status: "idle" | "syncing" | "ok" | "error";
     message?: string;
   };
 }) {
@@ -1416,6 +1422,22 @@ function ClassificationTableViewInner({
           </div>
         ) : (
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {treeSync && (
+              <>
+                <button
+                  type="button"
+                  className="button"
+                  onClick={treeSync.onClick}
+                  disabled={treeSync.status === "syncing"}
+                  title="구글시트(계정트리)를 읽어 검증하고 앱 분류DB 캐시를 갱신합니다 (시트 → 앱)"
+                >
+                  {treeSync.status === "syncing" ? "동기화 중..." : "시트에서 동기화"}
+                </button>
+                {treeSync.message && treeSync.status !== "syncing" && (
+                  <span className={`sheets-sync-status sheets-sync-${treeSync.status}`}>{treeSync.message}</span>
+                )}
+              </>
+            )}
             {sheetsSync && (
               <>
                 <button
@@ -2277,6 +2299,8 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   const [workspaceMemoMeta, setWorkspaceMemoMeta] = useState<{ updatedAt: string | null; updatedBy: string | null }>({ updatedAt: null, updatedBy: null });
   const memoSyncInitializedRef = useRef(false);
   const [sheetsSyncState, setSheetsSyncState] = useState<{ status: "idle" | "syncing" | "ok" | "error" | "disabled"; message?: string }>({ status: "idle" });
+  // 계정트리(구글시트 단일 소스) → 앱 캐시 동기화 상태. sheetsSyncState(앱→시트)와 별개.
+  const [treeSyncState, setTreeSyncState] = useState<{ status: "idle" | "syncing" | "ok" | "error"; message?: string }>({ status: "idle" });
   const sheetsAutoSyncInitializedRef = useRef(false);
   const [pastedText, setPastedText] = useState("");
   const [tolerance, setTolerance] = useState(1);
@@ -3078,6 +3102,38 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
         status: "error",
         message: err instanceof Error ? err.message : "구글시트 동기화 실패"
       });
+    }
+  }
+
+  // 계정트리 시트 → 앱 캐시. 검증 통과해야만 반영(실패 시 직전 정상본 유지).
+  async function syncTreeFromSheet() {
+    setTreeSyncState({ status: "syncing", message: "시트 읽고 검증 중..." });
+    try {
+      const res = await fetch("/api/classification-tree", { method: "POST" });
+      const data = await res.json().catch(() => null) as {
+        ok?: boolean;
+        reason?: string;
+        error?: string;
+        stats?: { total: number; leaves: number; structural: number; pending: number };
+        errorCount?: number;
+        warningCount?: number;
+      } | null;
+      if (data?.ok) {
+        const s = data.stats;
+        setTreeSyncState({
+          status: "ok",
+          message: `동기화 완료 — ${s?.total ?? 0}행 (계정 ${s?.leaves ?? 0})${data.warningCount ? `, 경고 ${data.warningCount}` : ""}`
+        });
+        window.setTimeout(() => setTreeSyncState((prev) => prev.status === "ok" ? { status: "idle" } : prev), 6000);
+      } else if (data?.reason === "validation_failed") {
+        setTreeSyncState({ status: "error", message: `검증 실패 — 오류 ${data.errorCount ?? 0}건. 반영 안 됨(직전 정상본 유지)` });
+      } else if (data?.reason === "migration_needed") {
+        setTreeSyncState({ status: "error", message: "DB 준비 안 됨 — 마이그레이션 007 먼저 실행" });
+      } else {
+        setTreeSyncState({ status: "error", message: data?.error ?? "동기화 실패" });
+      }
+    } catch (err) {
+      setTreeSyncState({ status: "error", message: err instanceof Error ? err.message : "동기화 실패" });
     }
   }
 
@@ -5213,6 +5269,11 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
                   accountEntries={accountDictionaryEntries}
                   catalog={classificationCatalog}
                   onOverridesChange={handleClassificationOverrides}
+                  treeSync={{
+                    onClick: syncTreeFromSheet,
+                    status: treeSyncState.status,
+                    message: treeSyncState.message
+                  }}
                   sheetsSync={{
                     onClick: syncClassificationDbOnly,
                     onResetClick: syncClassificationDbResetOnly,
