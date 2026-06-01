@@ -40,6 +40,8 @@ import {
 import { RESULT_CLASSIFICATION, RESULT_BY_GROUP } from "@/lib/validation/result-classification";
 import { type SharedStateResponse } from "@/lib/shared-state";
 import { AccountTreeMirror } from "@/components/account-tree-mirror";
+import { buildTreeCatalogLookupFromRows } from "@/lib/validation/account-tree-adapter";
+import { type AccountTreeRow } from "@/lib/validation/account-tree";
 import {
   buildHeaderRow as buildSheetsHeaderRow,
   buildQuarterRows as buildSheetsQuarterRows,
@@ -2300,6 +2302,19 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   const [workspaceMemoMeta, setWorkspaceMemoMeta] = useState<{ updatedAt: string | null; updatedBy: string | null }>({ updatedAt: null, updatedBy: null });
   const memoSyncInitializedRef = useRef(false);
   const [sheetsSyncState, setSheetsSyncState] = useState<{ status: "idle" | "syncing" | "ok" | "error" | "disabled"; message?: string }>({ status: "idle" });
+  // 계정트리 캐시 → 매칭용 lookup. 있으면 검증/점검이 옛 분류 대신 트리로 돈다.
+  const [accountTreeLookup, setAccountTreeLookup] = useState<ReturnType<typeof buildTreeCatalogLookupFromRows> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/classification-tree")
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled || !data?.ok || !Array.isArray(data.rows)) return;
+        setAccountTreeLookup(buildTreeCatalogLookupFromRows(data.rows as AccountTreeRow[]));
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
   const sheetsAutoSyncInitializedRef = useRef(false);
   const [pastedText, setPastedText] = useState("");
   const [tolerance, setTolerance] = useState(1);
@@ -3845,6 +3860,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
             companyConfigs,
             classificationGroups,
             classificationCatalog,
+            accountTreeLookup: accountTreeLookup ?? undefined,
             pasteEdits: dataset.source.pasteEdits ?? {},
             nameEdits: dataset.source.nameEdits ?? {},
             sessionSignFixes: {}
@@ -3861,7 +3877,8 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
             // pass under the *current* 분류DB?". Historical overrides would
             // hide that.
             sessionSignFixes: {},
-            classificationCatalog
+            classificationCatalog,
+            accountTreeLookup: accountTreeLookup ?? undefined
           });
 
           const failed: Array<{ rule: string; parent: string; expected: number; actual: number; diff: number }> = [];

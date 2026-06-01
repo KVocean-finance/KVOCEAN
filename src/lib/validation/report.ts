@@ -375,9 +375,21 @@ function isNegativeNetRow(row: StatementMatrixRow) {
   return Boolean(derived?.suffix && NET_NEGATIVE_SUFFIXES.has(derived.suffix as typeof DERIVED_ACCOUNT_SUFFIXES[number]));
 }
 
+/**
+ * Format a Date as YYYY-MM-DD using local calendar components.
+ * Must NOT round-trip through toISOString() — that applies a UTC offset, so a
+ * locally-parsed midnight (e.g. "2025/03/31" in KST) shifts back a day.
+ */
+function formatLocalDate(d: Date): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function dateLabelFromValue(value: string | number | Date | null | undefined) {
   if (value instanceof Date) {
-    return value.toISOString().slice(0, 10);
+    return formatLocalDate(value);
   }
 
   if (typeof value === "number") {
@@ -414,7 +426,7 @@ function buildPeriods(nameRow: string[], dataRows: Array<Array<string | number |
   const periods = dataRows.map((row, rowIndex) => {
     const rawLabel = dateIdx >= 0 ? dateLabelFromValue(row[dateIdx]) : `데이터${rowIndex + 1}`;
     const date = parseDate(rawLabel);
-    const label = date ? date.toISOString().slice(0, 10) : rawLabel;
+    const label = date ? formatLocalDate(date) : rawLabel;
     return {
       key: label || `data-${rowIndex}`,
       label: label || `데이터${rowIndex + 1}`,
@@ -449,7 +461,8 @@ function resolveRowMeta(
   classificationGroups: ClassificationGroups,
   companyName: string | null,
   sessionSignFixes: SessionSignFixes,
-  catalogLookup?: Map<string, CatalogAliasMatch[]>
+  catalogLookup?: Map<string, CatalogAliasMatch[]>,
+  treeOnly = false
 ) {
   const overrides = getEffectiveOverrides(logicConfig, companyConfigs, companyName);
   let prevSect = "";
@@ -465,7 +478,7 @@ function resolveRowMeta(
     // Use resolveSign so live catalog + minus-keyword safety net both apply
     // here too — otherwise the reporting path would silently default to + for
     // any unmatched account, even though the validator panel handles it now.
-    const classification = resolveSign(accountName, logicConfig, section, catalogLookup);
+    const classification = resolveSign(accountName, logicConfig, section, catalogLookup, treeOnly);
     let signCode = classification.sign;
     if (LOSS_ACCOUNTS.has(accountName.trim())) {
       signCode = 1;
@@ -482,6 +495,15 @@ function resolveRowMeta(
       signCode = sessionSignFixes[section][accountName];
     }
 
+    // 트리 모드: 손익계산서 줄이 자산/부채/자본(BS) 계정에 매칭되면, 이름만 같은
+    // "계산값"(영업이익·당기순이익·법인세차감전이익 등 — 계산기가 내는 합계)이다.
+    // 분류에서 제외(code=null). 자본변동표 등 BS 섹션에선 그대로 둔다(대분류로 구분).
+    let resolvedCode = classification.code;
+    if (treeOnly && resolvedCode != null && /손익/.test(section)) {
+      const l1 = String(resolvedCode)[0];
+      if (l1 === "1" || l1 === "2" || l1 === "3") resolvedCode = null;
+    }
+
         return {
           accountName,
           section,
@@ -489,7 +511,7 @@ function resolveRowMeta(
           canonicalKey: resolveCanonicalAccountKey(accountName, sectionKey, classificationGroups),
           signFlag: signCode === 1 ? 1 : 0,
           signCode,
-          code: classification.code,
+          code: resolvedCode,
           sourceCol: index
         } satisfies RowMeta;
   });
@@ -536,6 +558,7 @@ export function normalizePasteEditsForValidation(args: {
   companyConfigs: CompanyConfigs;
   classificationGroups: ClassificationGroups;
   classificationCatalog?: ClassificationCatalogGroup[];
+  accountTreeLookup?: Map<string, CatalogAliasMatch[]>;
   pasteEdits: Record<string, number>;
   nameEdits: Record<string, string>;
   sessionSignFixes: SessionSignFixes;
@@ -548,8 +571,9 @@ export function normalizePasteEditsForValidation(args: {
   const companyName = args.selectedCompany?.trim() || detectCompanyFromPaste(args.pastedText) || null;
   const periods = buildPeriods(parsed.nameRow, parsed.dataRows);
   const effectiveNameRow = resolveEditedNameRow(parsed.nameRow, args.nameEdits);
-  const catalogLookup = args.classificationCatalog ? buildCatalogAliasLookup(args.classificationCatalog) : undefined;
-  const metaRows = resolveRowMeta(parsed.catRow, effectiveNameRow, args.logicConfig, args.companyConfigs, args.classificationGroups, companyName, args.sessionSignFixes, catalogLookup);
+  const treeOnly = !!args.accountTreeLookup;
+  const catalogLookup = args.accountTreeLookup ?? (args.classificationCatalog ? buildCatalogAliasLookup(args.classificationCatalog) : undefined);
+  const metaRows = resolveRowMeta(parsed.catRow, effectiveNameRow, args.logicConfig, args.companyConfigs, args.classificationGroups, companyName, args.sessionSignFixes, catalogLookup, treeOnly);
   const nextPasteEdits = { ...args.pasteEdits };
 
   metaRows.forEach((meta) => {
@@ -1927,6 +1951,7 @@ export function buildReportingModel(args: {
   companyConfigs: CompanyConfigs;
   classificationGroups: ClassificationGroups;
   classificationCatalog?: ClassificationCatalogGroup[];
+  accountTreeLookup?: Map<string, CatalogAliasMatch[]>;
   pasteEdits: Record<string, number>;
   nameEdits: Record<string, string>;
   sessionSignFixes: SessionSignFixes;
@@ -1948,8 +1973,9 @@ export function buildReportingModel(args: {
   const companyName = args.selectedCompany?.trim() || detectedCompany || null;
   const periods = buildPeriods(parsed.nameRow, parsed.dataRows);
   const effectiveNameRow = resolveEditedNameRow(parsed.nameRow, args.nameEdits);
-  const catalogLookup = args.classificationCatalog ? buildCatalogAliasLookup(args.classificationCatalog) : undefined;
-  const metaRows = resolveRowMeta(parsed.catRow, effectiveNameRow, args.logicConfig, args.companyConfigs, args.classificationGroups, companyName, args.sessionSignFixes, catalogLookup);
+  const treeOnly = !!args.accountTreeLookup;
+  const catalogLookup = args.accountTreeLookup ?? (args.classificationCatalog ? buildCatalogAliasLookup(args.classificationCatalog) : undefined);
+  const metaRows = resolveRowMeta(parsed.catRow, effectiveNameRow, args.logicConfig, args.companyConfigs, args.classificationGroups, companyName, args.sessionSignFixes, catalogLookup, treeOnly);
   const normalizedPasteEdits = normalizePasteEditsForValidation(args);
   const rawStatementRows = buildStatementRows(metaRows, periods, parsed.dataRows, normalizedPasteEdits, false);
   const adjustedStatementRows = buildStatementRows(metaRows, periods, parsed.dataRows, normalizedPasteEdits, true);
@@ -1982,6 +2008,7 @@ export function buildQuarterSnapshots(args: {
   companyConfigs: CompanyConfigs;
   classificationGroups: ClassificationGroups;
   classificationCatalog?: ClassificationCatalogGroup[];
+  accountTreeLookup?: Map<string, CatalogAliasMatch[]>;
   pasteEdits: Record<string, number>;
   nameEdits: Record<string, string>;
   sessionSignFixes: SessionSignFixes;

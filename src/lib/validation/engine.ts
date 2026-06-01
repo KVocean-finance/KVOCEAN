@@ -344,17 +344,46 @@ function normalizeLookupKeyLocal(s: string) {
  * 자식 alias가 끼어들어 시드와 충돌하면 시드가 이긴다. 시드에 없는 alias만
  * catalog로 fallback (사용자가 분류DB에서 추가한 OCR 이름 변형 등).
  */
+// 섹션 → 허용 대분류. 트리 매칭이 대분류를 넘나들지 않게 한다(자산 줄이 부채
+// 계정에 매칭되는 것 방지). null이면 제한 없음(기타/불명 섹션). 못 맞으면 미분류.
+function expectedMajorCategories(section: string): Set<string> | null {
+  const s = section ?? "";
+  if (/부채/.test(s)) return new Set(["부채"]);
+  if (/자본/.test(s)) return new Set(["자본"]);
+  if (/자산/.test(s)) return new Set(["자산"]);
+  if (/손익|매출|원가|판매비|판관|영업외|영업이익|영업비용/.test(s)) return new Set(["수익", "비용"]);
+  if (/재무상태표|대차대조표/.test(s)) return new Set(["자산", "부채", "자본"]);
+  return null;
+}
+
 export function resolveAccountClassification(
   name: string,
   sectionName?: string,
-  catalogLookup?: Map<string, CatalogAliasMatch[]>
+  catalogLookup?: Map<string, CatalogAliasMatch[]>,
+  treeOnly = false
 ): { sign: SignCode; code: number | null } | null {
-  const seedEntry = findEntryByAlias(name, sectionName);
-  if (seedEntry) return { sign: seedEntry.sign as SignCode, code: seedEntry.code };
+  // treeOnly = 새 계정트리 단일 소스 모드 — 옛 시드/접미사 규칙을 건너뛰고
+  // catalogLookup(=트리 어댑터)만 본다. 기본 false면 기존 동작 그대로(안전).
+  if (!treeOnly) {
+    const seedEntry = findEntryByAlias(name, sectionName);
+    if (seedEntry) return { sign: seedEntry.sign as SignCode, code: seedEntry.code };
+  }
 
   if (catalogLookup) {
-    const candidates = catalogLookup.get(normalizeLookupKeyLocal(name));
+    let candidates = catalogLookup.get(normalizeLookupKeyLocal(name));
     if (candidates && candidates.length > 0) {
+      // 트리 모드: 섹션의 대분류 안에서만 매칭. 자산 줄이 부채 계정에 붙는 등
+      // 대분류를 넘나드는 매칭을 막고, 맞는 대분류가 없으면 미분류로 둔다
+      // (사용자가 나중에 DB에서 분류). 퇴직연금운용자산(자산)→순확정급여부채,
+      // 영업이익(손익)→자본 같은 오매칭이 여기서 걸린다.
+      if (treeOnly && sectionName) {
+        const allowed = expectedMajorCategories(sectionName);
+        if (allowed) {
+          const filtered = candidates.filter((c) => allowed.has(c.majorCategory));
+          if (filtered.length === 0) return null;
+          candidates = filtered;
+        }
+      }
       let pick = candidates[0];
       if (candidates.length > 1 && sectionName) {
         const hint = normalizeLookupKeyLocal(sectionName);
@@ -368,8 +397,10 @@ export function resolveAccountClassification(
       return { sign: pick.sign, code: Number.isFinite(parsedCode) && parsedCode > 0 ? parsedCode : null };
     }
   }
-  if (name.includes("_양수") || name.endsWith("양수")) return { sign: 0, code: null };
-  if (name.includes("_음수") || name.endsWith("음수")) return { sign: 1, code: null };
+  if (!treeOnly) {
+    if (name.includes("_양수") || name.endsWith("양수")) return { sign: 0, code: null };
+    if (name.includes("_음수") || name.endsWith("음수")) return { sign: 1, code: null };
+  }
   return null;
 }
 
@@ -377,9 +408,10 @@ export function inferSignFromName(
   name: string,
   _logicConfig: LogicConfig,
   sectionName?: string,
-  catalogLookup?: Map<string, CatalogAliasMatch[]>
+  catalogLookup?: Map<string, CatalogAliasMatch[]>,
+  treeOnly = false
 ): SignCode | null {
-  return resolveAccountClassification(name, sectionName, catalogLookup)?.sign ?? null;
+  return resolveAccountClassification(name, sectionName, catalogLookup, treeOnly)?.sign ?? null;
 }
 
 /**
@@ -396,9 +428,10 @@ export function resolveSign(
   name: string,
   _logicConfig: LogicConfig,
   sectionName?: string,
-  catalogLookup?: Map<string, CatalogAliasMatch[]>
+  catalogLookup?: Map<string, CatalogAliasMatch[]>,
+  treeOnly = false
 ): { sign: SignCode; matched: boolean; code: number | null } {
-  const result = resolveAccountClassification(name, sectionName, catalogLookup);
+  const result = resolveAccountClassification(name, sectionName, catalogLookup, treeOnly);
   if (result !== null) return { sign: result.sign, matched: true, code: result.code };
   return { sign: 0, matched: false, code: null };
 }
@@ -463,7 +496,8 @@ export function validatePasteSections(
   sessionSignFixes: SessionSignFixes,
   logicConfig: LogicConfig,
   companyConfigs: CompanyConfigs,
-  catalogLookup?: Map<string, CatalogAliasMatch[]>
+  catalogLookup?: Map<string, CatalogAliasMatch[]>,
+  treeOnly = false
 ): ValidationResult[] {
   const results: ValidationResult[] = [];
   const sectionOverrides = getEffectiveSectionOverrides(logicConfig, companyConfigs, companyName);
@@ -516,7 +550,7 @@ export function validatePasteSections(
       }
 
       // 1) Try catalog/seed lookup (with section disambiguation + keyword fallback).
-      const resolution = resolveSign(child.name, logicConfig, sect, catalogLookup);
+      const resolution = resolveSign(child.name, logicConfig, sect, catalogLookup, treeOnly);
       let sign: SignCode | null = resolution.sign;
       let unmatched = !resolution.matched;
 
@@ -944,10 +978,13 @@ export function runValidation(args: {
   /** Live classification catalog (4. 분류DB). When supplied, user edits there
    * take priority over the immutable seed for sign decisions. */
   classificationCatalog?: ClassificationCatalogGroup[];
+  /** 계정트리 어댑터 lookup. 주면 시드/옛카탈로그 무시하고 트리만 본다(treeOnly). */
+  accountTreeLookup?: Map<string, CatalogAliasMatch[]>;
 }): ValidationRun {
-  const catalogLookup = args.classificationCatalog
+  const treeOnly = !!args.accountTreeLookup;
+  const catalogLookup = args.accountTreeLookup ?? (args.classificationCatalog
     ? buildCatalogAliasLookup(args.classificationCatalog)
-    : undefined;
+    : undefined);
   const parsed = parsePastedText(args.pastedText);
   const detectedCompany = detectCompanyFromPaste(args.pastedText);
   const rawFirst = parsed.dataRows[0] ?? [];
@@ -991,7 +1028,8 @@ export function runValidation(args: {
       args.sessionSignFixes,
       args.logicConfig,
       args.companyConfigs,
-      catalogLookup
+      catalogLookup,
+      treeOnly
     ).map((result) => ({ ...result, 날짜: label }));
     resultsByDate[label] = results.sort((a, b) => {
       const sortDiff = resultSortKey(a._sort_parent) - resultSortKey(b._sort_parent);
