@@ -346,7 +346,7 @@ function normalizeLookupKeyLocal(s: string) {
  */
 // 섹션 → 허용 대분류. 트리 매칭이 대분류를 넘나들지 않게 한다(자산 줄이 부채
 // 계정에 매칭되는 것 방지). null이면 제한 없음(기타/불명 섹션). 못 맞으면 미분류.
-function expectedMajorCategories(section: string): Set<string> | null {
+export function expectedMajorCategories(section: string): Set<string> | null {
   const s = section ?? "";
   if (/부채/.test(s)) return new Set(["부채"]);
   if (/자본/.test(s)) return new Set(["자본"]);

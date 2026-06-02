@@ -28,6 +28,7 @@ import {
 import {
   buildCopyText,
   diagnoseDiff,
+  expectedMajorCategories,
   formatNumber,
   getDefaultPersistedState,
   parsePersistedState,
@@ -2822,7 +2823,22 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
 
     for (const e of agg.values()) {
       const key = normalizeAccountName(e.accountName);
-      const matches = accountTreeLookup.get(key);
+      const rawMatches = accountTreeLookup.get(key);
+      // 섹션 대분류 게이트: 계정이 등장한 섹션의 대분류 안에서만 매칭을 인정한다.
+      // 동명이계정(예: 비유동부채의 '보증금_현재가치할인차금'이 자산 쪽 동명 leaf에
+      // 붙는 오매칭)을 막아 미분류로 떨군다. 섹션 정보가 없거나 제한 없는 섹션이면
+      // 종전대로 전부 인정. 엔진(resolveAccountClassification)과 동일 규칙 재사용.
+      let matches = rawMatches;
+      if (rawMatches && rawMatches.length && e.sections.size) {
+        const allowed = new Set<string>();
+        let unrestricted = false;
+        for (const sec of e.sections.keys()) {
+          const set = expectedMajorCategories(sec);
+          if (!set) { unrestricted = true; break; }
+          set.forEach((c) => allowed.add(c));
+        }
+        if (!unrestricted) matches = rawMatches.filter((m) => allowed.has(m.majorCategory));
+      }
       if (matches && matches.length) {
         for (const m of matches) pushSources(m.groupId, e.sources);
         continue;
