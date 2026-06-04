@@ -1,26 +1,10 @@
-"use client";
+﻿"use client";
 
 import { Fragment, memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
-  CLASSIFICATION_ENTRIES,
-  DEFAULT_CLASSIFICATION_CATALOG,
-  DEFAULT_CLASSIFICATION_GROUPS,
   DEFAULT_COMPANY_CONFIGS,
   DEFAULT_LOGIC_CONFIG,
-  MANAGED_CLASSIFICATION_KEYS,
-  MANAGED_CLASSIFICATION_KEY_SET,
-  applyAliasOverridesToCatalog,
-  classificationCatalogToGroups,
-  classificationGroupsToCatalog,
-  findEntryByAlias,
-  findEntryByCode,
   isSystemFixedClassificationKey,
-  mergeDefaultClassificationCatalog,
-  sanitizeClassificationAliases,
-  sanitizeClassificationGroups,
-  type ClassificationCatalogGroup,
-  type ClassificationEntry,
-  type ClassificationGroups,
   type CompanyConfigs,
   type LogicConfig,
   type SignCode
@@ -38,7 +22,6 @@ import {
   type ValidationResult,
   type SessionSignFixes
 } from "@/lib/validation/engine";
-import { RESULT_CLASSIFICATION, RESULT_BY_GROUP } from "@/lib/validation/result-classification";
 import { type SharedStateResponse } from "@/lib/shared-state";
 import { AccountTreeMirror } from "@/components/account-tree-mirror";
 import { buildTreeCatalogLookupFromRows, buildTreeKeywordCodeSets } from "@/lib/validation/account-tree-adapter";
@@ -48,10 +31,7 @@ import {
   buildQuarterRows as buildSheetsQuarterRows,
   collectDistinctQuarters as collectSheetsQuarters,
   toSheetTabName,
-  buildClassificationDbTab,
-  buildClassificationDbResetTab,
   type SheetCellValue,
-  type AccountOccurrence,
   type AccountSource
 } from "@/lib/sheets-export";
 import {
@@ -72,7 +52,7 @@ import {
   type StatementMatrixRow
 } from "@/lib/validation/report";
 
-type TabKey = "validate" | "data" | "trash" | "report" | "config" | "classify" | "formulas" | "account-db" | "result-db";
+type TabKey = "validate" | "data" | "trash" | "report" | "config" | "formulas" | "account-db";
 
 // OCR 섹션 이름이 트리 가지 이름과 달라 매핑이 빗나갈 때 이어주는 별칭.
 // (미분류 대분류·중분류 추정 + ③ 시트 append 가지 결정에 함께 쓰임)
@@ -134,8 +114,6 @@ function parseDatasetApiResponse(raw: DatasetApiResponse) {
  */
 function buildSheetsSyncPayload(
   savedDatasets: SavedQuarterSnapshot[],
-  classificationGroups: ClassificationGroups,
-  classificationCatalog?: ClassificationCatalogGroup[],
   // 계정트리 로드 시 시트도 화면과 동일하게 read-time 재분류한다(① 컷오버).
   treeCtx?: Parameters<typeof rebuildSnapshotsWithTree>[1]
 ): { quarterTabs: Array<{ tabName: string; headers: string[]; rows: SheetCellValue[][] }> } {
@@ -151,17 +129,11 @@ function buildSheetsSyncPayload(
   const companyReports = new Map<string, ReportingModel>();
   for (const [name, snaps] of byCompany.entries()) {
     const reportSnaps = treeCtx ? rebuildSnapshotsWithTree(snaps, treeCtx) : snaps;
-    companyReports.set(name, buildCompanyReport(reportSnaps, classificationGroups));
+    companyReports.set(name, buildCompanyReport(reportSnaps));
   }
 
   const quarters = collectSheetsQuarters(Array.from(companyReports.values()));
   const headers = buildSheetsHeaderRow();
-
-  // 분류DB 탭 — collect OCR account occurrences across all saved datasets.
-  // catalog가 있으면 사용자의 런타임 편집(alias 이동/추가)을 반영해서 시트가
-  // 화면 표와 정확히 일치하도록 한다.
-  const accountOccurrences = collectAccountOccurrences(savedDatasets);
-  const classificationDbTab = buildClassificationDbTab(accountOccurrences, classificationCatalog);
 
   const quarterTabs = quarters.map((q) => ({
     tabName: toSheetTabName(q.key),
@@ -169,38 +141,7 @@ function buildSheetsSyncPayload(
     rows: buildSheetsQuarterRows({ quarterKey: q.key, companyReports })
   }));
 
-  // Prepend 분류DB so it's the first/visible tab when users open the sheet.
-  return {
-    quarterTabs: [classificationDbTab, ...quarterTabs]
-  };
-}
-
-/**
- * Walk every saved snapshot and collect (accountName, source) pairs.
- * Used to render the 출처 column in the 분류DB sheet tab.
- */
-function collectAccountOccurrences(savedDatasets: SavedQuarterSnapshot[]): AccountOccurrence[] {
-  const byName = new Map<string, AccountOccurrence>();
-  for (const dataset of savedDatasets) {
-    for (const row of dataset.adjustedStatementRows) {
-      const name = (row.accountName ?? "").trim();
-      if (!name) continue;
-      const existing = byName.get(name);
-      const source = {
-        companyName: dataset.companyName,
-        quarterLabel: dataset.quarterLabel
-      };
-      if (existing) {
-        const dup = existing.sources.some(
-          (s) => s.companyName === source.companyName && s.quarterLabel === source.quarterLabel
-        );
-        if (!dup) existing.sources.push(source);
-      } else {
-        byName.set(name, { accountName: name, sources: [source] });
-      }
-    }
-  }
-  return Array.from(byName.values());
+  return { quarterTabs };
 }
 
 type ComparisonColumn = {
@@ -465,14 +406,6 @@ function cloneCompanyConfigs(configs: CompanyConfigs): CompanyConfigs {
   }
 }
 
-function cloneClassificationGroups(groups: ClassificationGroups): ClassificationGroups {
-  try {
-    return structuredClone(groups);
-  } catch {
-    return structuredClone(DEFAULT_CLASSIFICATION_GROUPS);
-  }
-}
-
 function cloneSessionSignFixes(fixes: SessionSignFixes): SessionSignFixes {
   try {
     return structuredClone(fixes);
@@ -509,33 +442,6 @@ function resolveAccountDbSection(sectionKey: string) {
   }
 
   return "기타";
-}
-
-function buildManagedClassificationLookup(catalog: ClassificationCatalogGroup[]) {
-  const lookup = new Map<string, string>();
-
-  const orderedCatalog = [
-    ...catalog.filter((group) => group.canonicalKey.trim() !== "변동비"),
-    ...catalog.filter((group) => group.canonicalKey.trim() === "변동비")
-  ];
-
-  orderedCatalog.forEach((group) => {
-    const canonicalKey = group.canonicalKey.trim();
-    if (!MANAGED_CLASSIFICATION_KEY_SET.has(canonicalKey)) {
-      return;
-    }
-
-    lookup.set(normalizeAccountDictionaryKey(canonicalKey), canonicalKey);
-    sanitizeClassificationAliases(group.aliases).forEach((alias) => {
-      lookup.set(normalizeAccountDictionaryKey(alias), canonicalKey);
-    });
-  });
-
-  return lookup;
-}
-
-function resolveManagedClassification(accountName: string, lookup: Map<string, string>) {
-  return lookup.get(normalizeAccountDictionaryKey(accountName)) ?? "";
 }
 
 function shouldCollectAccountDictionaryRow(row: SavedQuarterSnapshot["adjustedStatementRows"][number]) {
@@ -616,11 +522,6 @@ function extractAccountDictionaryEntries(savedDatasets: SavedQuarterSnapshot[]) 
   return Array.from(entries.values()).sort((a, b) => a.sectionKey.localeCompare(b.sectionKey, "ko") || a.accountName.localeCompare(b.accountName, "ko"));
 }
 
-function getDisplayedClassificationAliases(group: ClassificationCatalogGroup) {
-  return sanitizeClassificationAliases(group.aliases)
-    .filter((alias) => alias.trim() && alias.trim() !== group.canonicalKey.trim());
-}
-
 function objectEntriesToRows(record: Record<string, string>): MapRow[] {
   return Object.entries(record).map(([section, parent]) => ({ section, parent }));
 }
@@ -676,1120 +577,6 @@ function rowsToCapitalSigns(rows: CapitalRuleRow[]) {
   }, {});
 }
 
-// ===========================================================================
-// 5-level classification tree — builds a 대 > 중 > 소 > 세 hierarchy from the
-// seed catalog, attaching live OCR-encountered accounts (occurrences). Used by
-// the 3-1 분류 탭 to give the user a navigable tree instead of a flat list.
-// ===========================================================================
-
-type ClassificationLeafOccurrence = {
-  accountName: string;
-  occurrences: number;
-  sources: Array<{ companyName: string; quarterLabel: string }>;
-};
-
-type ClassificationTreeLeaf = {
-  kind: "leaf";
-  nodeId: string;
-  code: number;
-  sign: 0 | 1;
-  세분류: string;
-  aliases: string[];
-  encountered: ClassificationLeafOccurrence[]; // OCR-seen alias forms
-  encounteredCount: number;
-};
-
-type ClassificationTreeBranch = {
-  kind: "branch";
-  nodeId: string;
-  level: "대분류" | "중분류" | "소분류";
-  name: string;
-  isUnclassified: boolean;
-  children: ClassificationTreeNode[];
-  leafCount: number;
-  encounteredCount: number;
-};
-
-type ClassificationTreeNode = ClassificationTreeLeaf | ClassificationTreeBranch;
-
-const UNCLASSIFIED_LABEL = "미분류";
-
-// Same rule as normalizeLookupKey in defaults.ts — keeps OCR-side dedup
-// (occurrences, 미분류 detection) in sync with the validator's matching.
-function normalizeAliasKey(value: string): string {
-  return (value ?? "").replace(/[\s_\-.\/\\()\[\]·•'"]+/g, "").toLowerCase();
-}
-
-function buildClassificationTree(
-  accountEntries: SectionAccountDbEntry[]
-): ClassificationTreeNode[] {
-  // Map alias → leaf occurrences (from saved OCR data)
-  const aliasOccurrences = new Map<string, { entry: ClassificationEntry; account: SectionAccountDbEntry }[]>();
-  const unclassifiedAccounts: SectionAccountDbEntry[] = [];
-
-  for (const acct of accountEntries) {
-    const matched = findEntryByAlias(acct.accountName, acct.sectionKey || acct.section);
-    if (matched) {
-      // Find which alias matched (case-insensitive)
-      const target = normalizeAliasKey(acct.accountName);
-      const aliasHit = matched.aliases.find((a) => normalizeAliasKey(a) === target) ?? matched.세분류;
-      const key = `${matched.code}::${normalizeAliasKey(aliasHit)}`;
-      const list = aliasOccurrences.get(key) ?? [];
-      list.push({ entry: matched, account: acct });
-      aliasOccurrences.set(key, list);
-    } else {
-      unclassifiedAccounts.push(acct);
-    }
-  }
-
-  // Group entries by 대 > 중 > 소
-  type AccumNode = Map<string, { node: ClassificationTreeBranch; subgroups?: AccumNode; leaves?: ClassificationTreeLeaf[] }>;
-  const root: AccumNode = new Map();
-
-  function ensureBranch(map: AccumNode, level: ClassificationTreeBranch["level"], name: string, idPrefix: string): { node: ClassificationTreeBranch; subgroups: AccumNode; leaves: ClassificationTreeLeaf[] } {
-    const displayName = name?.trim() || UNCLASSIFIED_LABEL;
-    const existing = map.get(displayName);
-    if (existing) {
-      if (!existing.subgroups) existing.subgroups = new Map();
-      if (!existing.leaves) existing.leaves = [];
-      return { node: existing.node, subgroups: existing.subgroups, leaves: existing.leaves };
-    }
-    const node: ClassificationTreeBranch = {
-      kind: "branch",
-      nodeId: `${idPrefix}::${displayName}`,
-      level,
-      name: displayName,
-      isUnclassified: displayName === UNCLASSIFIED_LABEL,
-      children: [],
-      leafCount: 0,
-      encounteredCount: 0
-    };
-    const slot = { node, subgroups: new Map() as AccumNode, leaves: [] as ClassificationTreeLeaf[] };
-    map.set(displayName, slot);
-    return slot;
-  }
-
-  for (const entry of CLASSIFICATION_ENTRIES) {
-    const 대 = ensureBranch(root, "대분류", entry.대분류, "L1");
-    const 중 = ensureBranch(대.subgroups, "중분류", entry.중분류, 대.node.nodeId);
-    const 소 = ensureBranch(중.subgroups, "소분류", entry.소분류, 중.node.nodeId);
-
-    const encountered: ClassificationLeafOccurrence[] = [];
-    for (const alias of entry.aliases) {
-      const key = `${entry.code}::${normalizeAliasKey(alias)}`;
-      const hits = aliasOccurrences.get(key) ?? [];
-      if (!hits.length) continue;
-      const sources: Array<{ companyName: string; quarterLabel: string }> = [];
-      let totalOccurrences = 0;
-      for (const hit of hits) {
-        totalOccurrences += hit.account.occurrences;
-        for (const src of hit.account.sources) {
-          if (!sources.some((s) => s.companyName === src.companyName && s.quarterLabel === src.quarterLabel)) {
-            sources.push({ companyName: src.companyName, quarterLabel: src.quarterLabel });
-          }
-        }
-      }
-      encountered.push({ accountName: alias, occurrences: totalOccurrences, sources });
-    }
-    const encounteredCount = encountered.reduce((acc, e) => acc + e.occurrences, 0);
-
-    const leaf: ClassificationTreeLeaf = {
-      kind: "leaf",
-      nodeId: `leaf::${entry.code}`,
-      code: entry.code,
-      sign: entry.sign,
-      세분류: entry.세분류,
-      aliases: entry.aliases,
-      encountered,
-      encounteredCount
-    };
-    소.leaves.push(leaf);
-    소.node.leafCount += 1;
-    소.node.encounteredCount += encounteredCount;
-    중.node.leafCount += 1;
-    중.node.encounteredCount += encounteredCount;
-    대.node.leafCount += 1;
-    대.node.encounteredCount += encounteredCount;
-  }
-
-  // Attach 미분류 accounts at the top level — they have no 대분류 to anchor to.
-  if (unclassifiedAccounts.length) {
-    const unc = ensureBranch(root, "대분류", UNCLASSIFIED_LABEL, "L1");
-    // Group accounts as fake leaves with just OCR data
-    for (const acct of unclassifiedAccounts) {
-      const leaf: ClassificationTreeLeaf = {
-        kind: "leaf",
-        nodeId: `unclassified::${acct.entryKey}`,
-        code: 9999999,
-        sign: 0,
-        세분류: acct.accountName,
-        aliases: [acct.accountName],
-        encountered: [{
-          accountName: acct.accountName,
-          occurrences: acct.occurrences,
-          sources: acct.sources.map((s) => ({ companyName: s.companyName, quarterLabel: s.quarterLabel }))
-        }],
-        encounteredCount: acct.occurrences
-      };
-      unc.leaves.push(leaf);
-      unc.node.leafCount += 1;
-      unc.node.encounteredCount += acct.occurrences;
-    }
-  }
-
-  // Walk the accumulator to assemble children arrays, with "미분류" branches always last
-  function finalize(map: AccumNode): ClassificationTreeNode[] {
-    const result: (ClassificationTreeBranch | ClassificationTreeLeaf)[] = [];
-    for (const slot of map.values()) {
-      const childBranches = slot.subgroups ? finalize(slot.subgroups) : [];
-      const childLeaves = (slot.leaves ?? []).slice().sort((a, b) => a.code - b.code);
-      slot.node.children = [...childBranches, ...childLeaves];
-      result.push(slot.node);
-    }
-    // 미분류는 항상 맨 밑
-    result.sort((a, b) => {
-      const aUnc = a.kind === "branch" && a.isUnclassified;
-      const bUnc = b.kind === "branch" && b.isUnclassified;
-      if (aUnc && !bUnc) return 1;
-      if (!aUnc && bUnc) return -1;
-      // Leaves: sort by code; branches: sort by name (Korean)
-      if (a.kind === "leaf" && b.kind === "leaf") return a.code - b.code;
-      if (a.kind === "branch" && b.kind === "branch") return a.name.localeCompare(b.name, "ko");
-      return a.kind === "branch" ? -1 : 1;
-    });
-    return result;
-  }
-
-  return finalize(root);
-}
-
-// Render a single tree node (branch or leaf) recursively.
-function ClassificationTreeNodeView({
-  node,
-  expanded,
-  onToggle,
-  depth = 0
-}: {
-  node: ClassificationTreeNode;
-  expanded: Set<string>;
-  onToggle: (nodeId: string) => void;
-  depth?: number;
-}) {
-  const isOpen = expanded.has(node.nodeId);
-  const indentStyle = { paddingLeft: 8 + depth * 16 } as const;
-
-  if (node.kind === "leaf") {
-    const signLabel = node.code === 9999999 ? "" : node.sign === 1 ? "−" : "+";
-    const signClass = node.code === 9999999 ? "" : node.sign === 1 ? "tree-sign tree-sign-minus" : "tree-sign tree-sign-plus";
-    return (
-      <li className={`tree-leaf${node.code === 9999999 ? " tree-leaf-unclassified" : ""}`}>
-        <div className="tree-row" style={indentStyle}>
-          <button
-            type="button"
-            className="tree-toggle"
-            onClick={() => onToggle(node.nodeId)}
-            aria-label={isOpen ? "접기" : "펼치기"}
-          >{isOpen ? "▼" : "▶"}</button>
-          <span className="tree-code">{node.code === 9999999 ? "—" : node.code}</span>
-          <span className="tree-leaf-name">{node.세분류}</span>
-          {signLabel && <span className={signClass}>{signLabel}</span>}
-          <span className="tree-count-badge" title="실제 OCR 등장 항목 수">
-            {node.encountered.length}/{node.aliases.length}
-          </span>
-        </div>
-        {isOpen && (
-          <ul className="tree-leaf-aliases">
-            {node.aliases.map((alias) => {
-              const occ = node.encountered.find((e) => e.accountName === alias);
-              return (
-                <li key={`${node.nodeId}-${alias}`} className={`tree-alias${occ ? " tree-alias-seen" : ""}`} style={{ paddingLeft: 8 + (depth + 1) * 16 }}>
-                  <span className="tree-alias-dot">•</span>
-                  <span className="tree-alias-name">{alias}</span>
-                  {occ && (
-                    <>
-                      <span className="tree-alias-count">×{occ.occurrences}</span>
-                      <span className="tree-alias-sources">{occ.sources.slice(0, 3).map((s) => `${s.companyName}${s.quarterLabel}`).join(", ")}{occ.sources.length > 3 ? ` 외 ${occ.sources.length - 3}건` : ""}</span>
-                    </>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </li>
-    );
-  }
-
-  // Branch
-  const levelClass = `tree-branch tree-branch-${node.level}${node.isUnclassified ? " tree-branch-unclassified" : ""}`;
-  return (
-    <li className={levelClass}>
-      <div className="tree-row" style={indentStyle}>
-        <button
-          type="button"
-          className="tree-toggle"
-          onClick={() => onToggle(node.nodeId)}
-          aria-label={isOpen ? "접기" : "펼치기"}
-        >{isOpen ? "▼" : "▶"}</button>
-        <span className={`tree-level-tag tree-level-${node.level}`}>{node.level}</span>
-        <span className="tree-branch-name">{node.name}</span>
-        <span className="tree-count-badge">세분류 {node.leafCount}{node.encounteredCount ? ` · 등장 ${node.encounteredCount}` : ""}</span>
-      </div>
-      {isOpen && (
-        <ul className="tree-children">
-          {node.children.map((child) => (
-            <ClassificationTreeNodeView
-              key={child.nodeId}
-              node={child}
-              expanded={expanded}
-              onToggle={onToggle}
-              depth={depth + 1}
-            />
-          ))}
-        </ul>
-      )}
-    </li>
-  );
-}
-
-// ===========================================================================
-// 분류DB 표 — 엑셀 양식과 동일한 평탄 표. 코드 ASC 정렬 + 검색 + 페이지네이션.
-// 한 행 = 한 (코드, alias) 페어. 미분류는 코드 9999999로 맨 아래.
-// ===========================================================================
-
-type ClassificationTableRow = {
-  rowKey: string;
-  code: number;
-  대분류: string;
-  중분류: string;
-  소분류: string;
-  세분류: string;
-  항목명: string;
-  sign: 0 | 1;
-  occurrences: number;
-  sources: Array<{ companyName: string; quarterLabel: string }>;
-  isUnclassified: boolean;
-};
-
-const UNCLASSIFIED_ROW_CODE = 9999999;
-
-function buildClassificationTableRows(
-  accountEntries: SectionAccountDbEntry[],
-  catalog: ClassificationCatalogGroup[]
-): ClassificationTableRow[] {
-  // Build occurrence lookup from current saved data.
-  const occByName = new Map<string, { occurrences: number; sources: Array<{ companyName: string; quarterLabel: string }> }>();
-  for (const acct of accountEntries) {
-    const key = normalizeAliasKey(acct.accountName);
-    if (!key) continue;
-    const existing = occByName.get(key);
-    const newSources = acct.sources.map((s) => ({ companyName: s.companyName, quarterLabel: s.quarterLabel }));
-    if (existing) {
-      existing.occurrences += acct.occurrences;
-      for (const src of newSources) {
-        if (!existing.sources.some((s) => s.companyName === src.companyName && s.quarterLabel === src.quarterLabel)) {
-          existing.sources.push(src);
-        }
-      }
-    } else {
-      occByName.set(key, { occurrences: acct.occurrences, sources: newSources });
-    }
-  }
-
-  // Rows are derived from the runtime catalog (the source of truth) rather than
-  // the static seed file — otherwise user-added aliases (e.g. classifying a
-  // 미분류 OCR row) wouldn't appear after save, and that row would keep
-  // showing up as 미분류 on every refresh. Seed provides the 대/중/소/세/sign
-  // metadata via groupId/code lookup.
-  const matchedAliasKeys = new Set<string>();
-  const rows: ClassificationTableRow[] = [];
-  const seenRowKeys = new Set<string>();
-  for (const group of catalog) {
-    const code = parseInt(group.groupId, 10);
-    if (!Number.isFinite(code)) continue;
-    const seed = findEntryByCode(code);
-    if (!seed) continue;
-    // classificationGroupsToCatalog strips canonicalKey (= seed.세분류) out of
-    // group.aliases, so prepend the seed 세분류 itself to keep its row visible.
-    const aliasList: string[] = [seed.세분류, ...group.aliases];
-    for (const alias of aliasList) {
-      const normKey = normalizeAliasKey(alias);
-      if (!normKey) continue;
-      // Seed wins for OCR matching — if this alias has a different seed home
-      // (e.g. "매출채권_대손충당금" belongs to 1001100 but the persisted catalog
-      // mistakenly also has it in 1001000), don't render a duplicate row here.
-      const seedHome = findEntryByAlias(alias);
-      if (seedHome && seedHome.code !== seed.code) continue;
-      const rowKey = `catalog::${code}::${normKey}`;
-      if (seenRowKeys.has(rowKey)) continue;
-      seenRowKeys.add(rowKey);
-      matchedAliasKeys.add(normKey);
-      const occ = occByName.get(normKey);
-      rows.push({
-        rowKey,
-        code: seed.code,
-        대분류: seed.대분류,
-        중분류: seed.중분류,
-        소분류: seed.소분류,
-        세분류: seed.세분류,
-        항목명: alias,
-        sign: seed.sign,
-        occurrences: occ?.occurrences ?? 0,
-        sources: occ?.sources ?? [],
-        isUnclassified: false
-      });
-    }
-  }
-
-  // 미분류 — OCR 항목 중 매칭 안 된 것.
-  // Pre-fill 대/중분류 from the OCR section so the user only has to pick
-  // 소/세분류 + 부호 in the editor (e.g. OCR section "유동자산" → 자산/유동자산).
-  for (const acct of accountEntries) {
-    const aliasKey = normalizeAliasKey(acct.accountName);
-    if (matchedAliasKeys.has(aliasKey)) continue;
-    const { 대분류, 중분류 } = inferUnclassifiedHierarchy(acct.sectionKey || acct.section);
-    rows.push({
-      rowKey: `unclassified::${acct.entryKey}`,
-      code: UNCLASSIFIED_ROW_CODE,
-      대분류,
-      중분류,
-      소분류: "",
-      세분류: "",
-      항목명: acct.accountName,
-      sign: 0,
-      occurrences: acct.occurrences,
-      sources: acct.sources.map((s) => ({ companyName: s.companyName, quarterLabel: s.quarterLabel })),
-      isUnclassified: true
-    });
-  }
-
-  return rows;
-}
-
-/**
- * Map an OCR section label (e.g. "유동자산", "영업외비용") to the seed's
- * 대분류/중분류 so an unclassified row already shows where it came from.
- * Looks up the first seed entry whose 중분류 (then 대분류) matches.
- */
-function inferUnclassifiedHierarchy(sectionLabel: string): { 대분류: string; 중분류: string } {
-  const trimmed = (sectionLabel ?? "").trim();
-  // "기타" is an ACCOUNT_DB_SECTIONS catch-all bucket, not a real OCR section —
-  // skip it so we don't accidentally inherit 자본/기타 from a seed match.
-  if (!trimmed || trimmed === "기타") return { 대분류: "", 중분류: "" };
-  const byMiddle = CLASSIFICATION_ENTRIES.find((e) => e.중분류 === trimmed);
-  if (byMiddle) return { 대분류: byMiddle.대분류, 중분류: byMiddle.중분류 };
-  const byMajor = CLASSIFICATION_ENTRIES.find((e) => e.대분류 === trimmed);
-  if (byMajor) return { 대분류: byMajor.대분류, 중분류: byMajor.중분류 };
-  return { 대분류: "", 중분류: "" };
-}
-
-function formatRowSources(sources: ClassificationTableRow["sources"]): string {
-  if (!sources.length) return "";
-  const fmt = (s: { companyName: string; quarterLabel: string }) => {
-    const m = /^(\d{4})-(\d{2})/.exec(s.quarterLabel ?? "");
-    const yymm = m ? `${m[1].slice(2)}${m[2]}` : (s.quarterLabel ?? "");
-    return `${s.companyName}${yymm}`;
-  };
-  const first = sources.slice(0, 3).map(fmt).join(", ");
-  return sources.length > 3 ? `${first} 외 ${sources.length - 3}건` : first;
-}
-
-type SortField = "code" | "대분류" | "중분류" | "소분류" | "세분류" | "항목명" | "occurrences";
-type SortDir = "asc" | "desc";
-
-type EditableDraft = {
-  대분류: string;
-  중분류: string;
-  소분류: string;
-  세분류: string;
-  sign: 0 | 1;
-};
-
-// Build dropdown options derived from the seed catalog
-type ClassificationOptions = {
-  대분류_OPTIONS: string[];
-  중분류_BY_대: Map<string, string[]>;
-  소분류_BY_대중: Map<string, string[]>;
-  세분류_BY_대중소: Map<string, Array<{ 세분류: string; code: number; sign: 0 | 1 }>>;
-};
-
-// Build once at module load — seed data is immutable per build.
-let _cachedOptions: ClassificationOptions | null = null;
-function getClassificationOptions(): ClassificationOptions {
-  if (!_cachedOptions) _cachedOptions = buildClassificationOptions();
-  return _cachedOptions;
-}
-
-// Same idea for the seed-only portion of table rows (everything except live OCR occurrences).
-// We cache the seed rows and only attach occurrences per render.
-function buildClassificationOptions(): ClassificationOptions {
-  const 대Set = new Set<string>();
-  const 중Map = new Map<string, Set<string>>();
-  const 소Map = new Map<string, Set<string>>();
-  const 세Map = new Map<string, Array<{ 세분류: string; code: number; sign: 0 | 1 }>>();
-
-  for (const e of CLASSIFICATION_ENTRIES) {
-    if (!e.대분류) continue;
-    대Set.add(e.대분류);
-    const k중 = e.대분류;
-    if (!중Map.has(k중)) 중Map.set(k중, new Set());
-    if (e.중분류) 중Map.get(k중)!.add(e.중분류);
-
-    const k소 = `${e.대분류}|${e.중분류}`;
-    if (!소Map.has(k소)) 소Map.set(k소, new Set());
-    if (e.소분류) 소Map.get(k소)!.add(e.소분류);
-
-    const k세 = `${e.대분류}|${e.중분류}|${e.소분류}`;
-    if (!세Map.has(k세)) 세Map.set(k세, []);
-    세Map.get(k세)!.push({ 세분류: e.세분류, code: e.code, sign: e.sign });
-  }
-
-  return {
-    대분류_OPTIONS: Array.from(대Set).sort((a, b) => a.localeCompare(b, "ko")),
-    중분류_BY_대: new Map(Array.from(중Map.entries()).map(([k, v]) => [k, Array.from(v).sort((a, b) => a.localeCompare(b, "ko"))])),
-    소분류_BY_대중: new Map(Array.from(소Map.entries()).map(([k, v]) => [k, Array.from(v).sort((a, b) => a.localeCompare(b, "ko"))])),
-    세분류_BY_대중소: new Map(Array.from(세Map.entries()).map(([k, v]) => [k, v.slice().sort((a, b) => a.code - b.code)]))
-  };
-}
-
-// Validate a draft against the seed tree.
-// Returns the matched ClassificationEntry (code+sign), or an error message.
-function validateDraft(draft: EditableDraft, options: ClassificationOptions): { entry: { code: number; sign: 0 | 1 } | null; error: string | null } {
-  if (!draft.대분류) return { entry: null, error: "대분류를 선택하세요" };
-  if (!options.대분류_OPTIONS.includes(draft.대분류)) return { entry: null, error: "유효하지 않은 대분류" };
-
-  if (!draft.중분류) return { entry: null, error: "중분류를 선택하세요" };
-  const 중List = options.중분류_BY_대.get(draft.대분류) ?? [];
-  if (!중List.includes(draft.중분류)) return { entry: null, error: `${draft.대분류} 안에 없는 중분류` };
-
-  if (!draft.소분류) return { entry: null, error: "소분류를 선택하세요" };
-  const 소List = options.소분류_BY_대중.get(`${draft.대분류}|${draft.중분류}`) ?? [];
-  if (!소List.includes(draft.소분류)) return { entry: null, error: `${draft.대분류} > ${draft.중분류} 안에 없는 소분류` };
-
-  if (!draft.세분류) return { entry: null, error: "세분류를 선택하세요" };
-  const 세List = options.세분류_BY_대중소.get(`${draft.대분류}|${draft.중분류}|${draft.소분류}`) ?? [];
-  // Match by 세분류 name AND sign — same name can exist with both + and − (e.g. 매출채권 / 매출채권_대손충당금)
-  const matched = 세List.find((e) => e.세분류 === draft.세분류 && e.sign === draft.sign);
-  if (!matched) {
-    const available = 세List.find((e) => e.세분류 === draft.세분류);
-    if (available) return { entry: null, error: `세분류 부호 불일치 (선택한 부호 ${draft.sign === 1 ? "−" : "+"})` };
-    return { entry: null, error: `${draft.소분류} 안에 없는 세분류` };
-  }
-  return { entry: matched, error: null };
-}
-
-function compareRows(a: ClassificationTableRow, b: ClassificationTableRow, field: SortField, dir: SortDir): number {
-  const sign = dir === "asc" ? 1 : -1;
-  if (field === "code" || field === "occurrences") {
-    return ((a[field] as number) - (b[field] as number)) * sign;
-  }
-  return String(a[field] ?? "").localeCompare(String(b[field] ?? ""), "ko") * sign;
-}
-
-type AliasOverride = {
-  // Destination seed entry (validated)
-  code: number;
-  대분류: string;
-  중분류: string;
-  소분류: string;
-  세분류: string;
-  sign: 0 | 1;
-};
-
-function ClassificationTableViewInner({
-  accountEntries,
-  catalog,
-  onOverridesChange,
-  initialFilters,
-  sheetsSync,
-  treeSync
-}: {
-  accountEntries: SectionAccountDbEntry[];
-  catalog: ClassificationCatalogGroup[];
-  onOverridesChange?: (overrides: Map<string, AliasOverride>) => void;
-  initialFilters?: { showOnlyUnclassified?: boolean; showOnlyEncountered?: boolean };
-  sheetsSync?: {
-    onClick: () => void;
-    onResetClick?: () => void;
-    status: "idle" | "syncing" | "ok" | "error" | "disabled";
-    message?: string;
-  };
-  treeSync?: {
-    onClick: () => void;
-    status: "idle" | "syncing" | "ok" | "error";
-    message?: string;
-  };
-}) {
-  const baseRows = useMemo(() => buildClassificationTableRows(accountEntries, catalog), [accountEntries, catalog]);
-  const options = useMemo(() => getClassificationOptions(), []);
-  const [overrides, setOverrides] = useState<Map<string, AliasOverride>>(new Map());
-
-  // Apply overrides on top of baseRows
-  const allRows = useMemo(() => {
-    if (!overrides.size) return baseRows;
-    return baseRows.map((row) => {
-      const ov = overrides.get(row.항목명);
-      if (!ov) return row;
-      return {
-        ...row,
-        code: ov.code,
-        대분류: ov.대분류,
-        중분류: ov.중분류,
-        소분류: ov.소분류,
-        세분류: ov.세분류,
-        sign: ov.sign,
-        isUnclassified: false
-      };
-    });
-  }, [baseRows, overrides]);
-
-  const [search, setSearch] = useState("");
-  const [sortField, setSortField] = useState<SortField>("code");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
-  const [pageSize, setPageSize] = useState(50);
-  const [page, setPage] = useState(0);
-  const [showOnlyUnclassified, setShowOnlyUnclassified] = useState(initialFilters?.showOnlyUnclassified ?? false);
-  const [showOnlyEncountered, setShowOnlyEncountered] = useState(initialFilters?.showOnlyEncountered ?? false);
-
-  // Bulk-edit mode: 토글로 편집 활성화 → 여러 행 수정 → 일괄 저장/취소.
-  // drafts holds the in-progress edits keyed by rowKey; rows not in the map
-  // render their saved values. A row is "dirty" iff its draft differs from
-  // its current saved/seed value.
-  const [editMode, setEditMode] = useState(false);
-  const [drafts, setDrafts] = useState<Map<string, EditableDraft>>(new Map());
-
-  function rowToDraft(row: ClassificationTableRow): EditableDraft {
-    return {
-      대분류: row.대분류,
-      중분류: row.중분류,
-      소분류: row.소분류,
-      세분류: row.세분류,
-      sign: row.sign
-    };
-  }
-  function getDraft(row: ClassificationTableRow): EditableDraft {
-    return drafts.get(row.rowKey) ?? rowToDraft(row);
-  }
-  function isDirty(row: ClassificationTableRow): boolean {
-    const d = drafts.get(row.rowKey);
-    if (!d) return false;
-    return (
-      d.대분류 !== row.대분류
-      || d.중분류 !== row.중분류
-      || d.소분류 !== row.소분류
-      || d.세분류 !== row.세분류
-      || d.sign !== row.sign
-    );
-  }
-  function updateDraft(row: ClassificationTableRow, partial: Partial<EditableDraft>) {
-    setDrafts((prev) => {
-      const next = new Map(prev);
-      const current = next.get(row.rowKey) ?? rowToDraft(row);
-      next.set(row.rowKey, { ...current, ...partial });
-      return next;
-    });
-  }
-  function discardRowDraft(rowKey: string) {
-    setDrafts((prev) => {
-      if (!prev.has(rowKey)) return prev;
-      const next = new Map(prev);
-      next.delete(rowKey);
-      return next;
-    });
-  }
-  function enterEditMode() {
-    setEditMode(true);
-    setDrafts(new Map());
-  }
-  function exitEditMode() {
-    setEditMode(false);
-    setDrafts(new Map());
-  }
-  function saveAllDrafts() {
-    const next = new Map(overrides);
-    let saved = 0;
-    const failures: Array<{ name: string; error: string }> = [];
-    for (const [rowKey, draft] of drafts.entries()) {
-      const row = allRows.find((r) => r.rowKey === rowKey);
-      if (!row) continue;
-      // skip rows whose draft equals the saved value (no actual change)
-      if (!isDirty(row)) continue;
-      const result = validateDraft(draft, options);
-      if (!result.entry) {
-        failures.push({ name: row.항목명, error: result.error ?? "유효하지 않은 분류" });
-        continue;
-      }
-      next.set(row.항목명, {
-        code: result.entry.code,
-        대분류: draft.대분류,
-        중분류: draft.중분류,
-        소분류: draft.소분류,
-        세분류: draft.세분류,
-        sign: result.entry.sign
-      });
-      saved++;
-    }
-    if (saved > 0) {
-      setOverrides(next);
-      onOverridesChange?.(next);
-    }
-    // Stay in edit mode if anything failed so the user can finish the
-    // incomplete row(s) — otherwise the partial pick is silently lost.
-    if (failures.length > 0) {
-      const shown = failures.slice(0, 10).map((f) => `• ${f.name}: ${f.error}`).join("\n");
-      const extra = failures.length > 10 ? `\n...외 ${failures.length - 10}건` : "";
-      const savedNote = saved > 0 ? `\n\n${saved}개 행은 정상 저장되었습니다.` : "";
-      window.alert(`${failures.length}개 행이 분류 미완성으로 저장되지 않았습니다 (대/중/소/세 모두 선택 필요):\n${shown}${extra}${savedNote}`);
-      return;
-    }
-    setEditMode(false);
-    setDrafts(new Map());
-  }
-  function revertOverride(itemName: string) {
-    if (!overrides.has(itemName)) return;
-    const next = new Map(overrides);
-    next.delete(itemName);
-    setOverrides(next);
-    onOverridesChange?.(next);
-  }
-
-  // Defer heavy filtering until typing pauses so the input stays responsive.
-  const deferredSearch = useDeferredValue(search);
-  const deferredShowOnlyUnclassified = useDeferredValue(showOnlyUnclassified);
-  const deferredShowOnlyEncountered = useDeferredValue(showOnlyEncountered);
-
-  const filtered = useMemo(() => {
-    const q = deferredSearch.trim().toLowerCase();
-    return allRows.filter((row) => {
-      if (deferredShowOnlyUnclassified && !row.isUnclassified) return false;
-      if (deferredShowOnlyEncountered && row.occurrences === 0) return false;
-      if (!q) return true;
-      return (
-        String(row.code).includes(q)
-        || row.대분류.toLowerCase().includes(q)
-        || row.중분류.toLowerCase().includes(q)
-        || row.소분류.toLowerCase().includes(q)
-        || row.세분류.toLowerCase().includes(q)
-        || row.항목명.toLowerCase().includes(q)
-      );
-    });
-  }, [allRows, deferredSearch, deferredShowOnlyUnclassified, deferredShowOnlyEncountered]);
-
-  const sorted = useMemo(() => {
-    return filtered.slice().sort((a, b) => compareRows(a, b, sortField, sortDir));
-  }, [filtered, sortField, sortDir]);
-
-  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
-  const safePage = Math.min(page, totalPages - 1);
-  const pageRows = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize);
-
-  function toggleSort(field: SortField) {
-    if (sortField === field) {
-      setSortDir((dir) => (dir === "asc" ? "desc" : "asc"));
-    } else {
-      setSortField(field);
-      setSortDir(field === "occurrences" ? "desc" : "asc");
-    }
-    setPage(0);
-  }
-
-  function arrow(field: SortField): string {
-    if (sortField !== field) return "";
-    return sortDir === "asc" ? " ▲" : " ▼";
-  }
-
-  const unclassifiedCount = allRows.filter((r) => r.isUnclassified).length;
-  const encounteredCount = allRows.filter((r) => r.occurrences > 0 && !r.isUnclassified).length;
-  const dirtyCount = useMemo(() => {
-    if (!editMode || !drafts.size) return 0;
-    let n = 0;
-    for (const row of allRows) {
-      if (isDirty(row)) n++;
-    }
-    return n;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allRows, drafts, editMode]);
-
-  return (
-    <div className="classification-table-view">
-      <div className="classification-table-toolbar">
-        <input
-          className="input"
-          placeholder="코드/이름/항목명 검색"
-          value={search}
-          onChange={(e) => { setSearch(e.target.value); setPage(0); }}
-          style={{ minWidth: 240, flex: "0 1 320px" }}
-        />
-        <label className="filter-chip">
-          <input type="checkbox" checked={showOnlyEncountered} onChange={(e) => { setShowOnlyEncountered(e.target.checked); setPage(0); }} />
-          OCR ({encounteredCount})
-        </label>
-        <label className="filter-chip">
-          <input type="checkbox" checked={showOnlyUnclassified} onChange={(e) => { setShowOnlyUnclassified(e.target.checked); setPage(0); }} />
-          미분류만 ({unclassifiedCount})
-        </label>
-        <span className="muted" style={{ marginLeft: "auto", fontSize: 12 }}>
-          전체 {allRows.length.toLocaleString()} · 필터 후 {sorted.length.toLocaleString()}
-        </span>
-        {editMode ? (
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span className="muted" style={{ fontSize: 12 }}>
-              {dirtyCount > 0 ? `${dirtyCount}개 행 수정됨` : "수정사항 없음"}
-            </span>
-            <button type="button" className="ghost-button" onClick={exitEditMode}>변경사항 취소</button>
-            <button type="button" className="button" disabled={dirtyCount === 0} onClick={saveAllDrafts}>
-              수정사항 업데이트{dirtyCount > 0 ? ` (${dirtyCount})` : ""}
-            </button>
-          </div>
-        ) : (
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            {treeSync && (
-              <>
-                <button
-                  type="button"
-                  className="button"
-                  onClick={treeSync.onClick}
-                  disabled={treeSync.status === "syncing"}
-                  title="구글시트(계정트리)를 읽어 검증하고 앱 분류DB 캐시를 갱신합니다 (시트 → 앱)"
-                >
-                  {treeSync.status === "syncing" ? "동기화 중..." : "시트에서 동기화"}
-                </button>
-                {treeSync.message && treeSync.status !== "syncing" && (
-                  <span className={`sheets-sync-status sheets-sync-${treeSync.status}`}>{treeSync.message}</span>
-                )}
-              </>
-            )}
-            {sheetsSync && (
-              <>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={sheetsSync.onClick}
-                  disabled={sheetsSync.status === "syncing"}
-                  title="현재 분류DB(편집/저장된 상태) 그대로 구글시트 '분류DB' 탭에 덮어쓰기"
-                >
-                  {sheetsSync.status === "syncing" ? "동기화 중..." : "구글시트로 보내기"}
-                </button>
-                {sheetsSync.onResetClick && (
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    onClick={sheetsSync.onResetClick}
-                    disabled={sheetsSync.status === "syncing"}
-                    title="저장된 OCR 항목들을 seed의 대분류/중분류/부호만 채워 '분류DB_재설정' 탭에 새로 쓰기 (소분류·세분류는 모두 미분류)"
-                  >
-                    분류DB 재설정 시트
-                  </button>
-                )}
-                {sheetsSync.status !== "idle" && sheetsSync.status !== "syncing" && sheetsSync.status !== "disabled" && (
-                  <span className={`sheets-sync-status sheets-sync-${sheetsSync.status}`}>
-                    {sheetsSync.status === "ok" && (sheetsSync.message ?? "동기화 완료")}
-                    {sheetsSync.status === "error" && (sheetsSync.message ?? "동기화 실패")}
-                  </span>
-                )}
-              </>
-            )}
-            <button type="button" className="ghost-button" onClick={enterEditMode}>편집모드</button>
-          </div>
-        )}
-      </div>
-      {editMode && (
-        <div className="muted" style={{ fontSize: 12, padding: "6px 12px", background: "#fffbeb", borderRadius: 6 }}>
-          편집모드입니다. 셀의 드롭다운을 바꾸면 행이 노란색으로 강조됩니다. 변경 후 「수정사항 업데이트」를 눌러야 분류DB에 저장됩니다.
-        </div>
-      )}
-
-      <div className="classification-table-scroll">
-        <table className="table report-table classification-flat-table">
-          <thead>
-            <tr>
-              <th onClick={() => toggleSort("code")} className="sortable">코드{arrow("code")}</th>
-              <th onClick={() => toggleSort("대분류")} className="sortable">대분류{arrow("대분류")}</th>
-              <th onClick={() => toggleSort("중분류")} className="sortable">중분류{arrow("중분류")}</th>
-              <th onClick={() => toggleSort("소분류")} className="sortable">소분류{arrow("소분류")}</th>
-              <th onClick={() => toggleSort("세분류")} className="sortable">세분류{arrow("세분류")}</th>
-              <th onClick={() => toggleSort("항목명")} className="sortable">항목명{arrow("항목명")}</th>
-              <th>부호</th>
-              <th>출처</th>
-              <th>편집</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pageRows.map((row) => {
-              const hasOverride = overrides.has(row.항목명);
-              const dirty = editMode && isDirty(row);
-              const rowClass = `${row.isUnclassified ? "row-unclassified" : ""}${row.occurrences > 0 && !row.isUnclassified ? " row-encountered" : ""}${hasOverride ? " row-override" : ""}${dirty ? " row-modified" : ""}`.trim();
-
-              if (editMode) {
-                const draft = getDraft(row);
-                const validation = validateDraft(draft, options);
-                const 중Options = options.중분류_BY_대.get(draft.대분류) ?? [];
-                const 소Options = options.소분류_BY_대중.get(`${draft.대분류}|${draft.중분류}`) ?? [];
-                const 세Options = options.세분류_BY_대중소.get(`${draft.대분류}|${draft.중분류}|${draft.소분류}`) ?? [];
-                const 세Names = Array.from(new Set(세Options.map((x) => x.세분류))).sort((a, b) => a.localeCompare(b, "ko"));
-                const dirtyStyle = dirty ? { background: "#fef3c7" } : undefined;
-                return (
-                  <Fragment key={row.rowKey}>
-                    <tr className={rowClass} style={dirtyStyle}>
-                      <td className="cell-code">{validation.entry ? validation.entry.code : (row.code === UNCLASSIFIED_ROW_CODE ? "—" : row.code)}</td>
-                      <td>
-                        <select className="select cell-select" value={draft.대분류} onChange={(e) => updateDraft(row, { 대분류: e.target.value, 중분류: "", 소분류: "", 세분류: "", sign: 0 })}>
-                          <option value="">선택</option>
-                          {options.대분류_OPTIONS.map((x) => <option key={x} value={x}>{x}</option>)}
-                        </select>
-                      </td>
-                      <td>
-                        <select className="select cell-select" value={draft.중분류} disabled={!draft.대분류} onChange={(e) => updateDraft(row, { 중분류: e.target.value, 소분류: "", 세분류: "" })}>
-                          <option value="">선택</option>
-                          {중Options.map((x) => <option key={x} value={x}>{x}</option>)}
-                        </select>
-                      </td>
-                      <td>
-                        <select className="select cell-select" value={draft.소분류} disabled={!draft.중분류} onChange={(e) => updateDraft(row, { 소분류: e.target.value, 세분류: "" })}>
-                          <option value="">선택</option>
-                          {소Options.map((x) => <option key={x} value={x}>{x}</option>)}
-                        </select>
-                      </td>
-                      <td>
-                        <select className="select cell-select" value={draft.세분류} disabled={!draft.소분류} onChange={(e) => {
-                          const name = e.target.value;
-                          const first = 세Options.find((x) => x.세분류 === name);
-                          updateDraft(row, { 세분류: name, sign: first ? first.sign : draft.sign });
-                        }}>
-                          <option value="">선택</option>
-                          {세Names.map((x) => <option key={x} value={x}>{x}</option>)}
-                        </select>
-                      </td>
-                      <td className="cell-name">{row.항목명}{hasOverride && <span className="override-tag">수정됨</span>}</td>
-                      <td>
-                        <select className="select cell-select-narrow" value={String(draft.sign)} onChange={(e) => updateDraft(row, { sign: Number(e.target.value) as 0 | 1 })}>
-                          <option value="0">+</option>
-                          <option value="1">−</option>
-                        </select>
-                      </td>
-                      <td className="cell-source">{formatRowSources(row.sources)}</td>
-                      <td className="cell-actions">
-                        {dirty && <button type="button" className="ghost-button button-tiny" onClick={() => discardRowDraft(row.rowKey)} title="이 행 변경 취소">↺</button>}
-                      </td>
-                    </tr>
-                    {dirty && validation.error && (
-                      <tr className="row-validation-error">
-                        <td colSpan={9} className="validation-error-cell">⚠️ {validation.error}</td>
-                      </tr>
-                    )}
-                  </Fragment>
-                );
-              }
-
-              return (
-                <tr key={row.rowKey} className={rowClass}>
-                  <td className="cell-code">{row.code === UNCLASSIFIED_ROW_CODE ? "—" : row.code}</td>
-                  <td>{row.대분류}</td>
-                  <td>{row.중분류}</td>
-                  <td>{row.소분류 || (row.isUnclassified ? "미분류" : "")}</td>
-                  <td>{row.세분류}</td>
-                  <td className="cell-name">{row.항목명}{hasOverride && <span className="override-tag">수정됨</span>}</td>
-                  <td className={row.sign === 1 ? "cell-sign cell-sign-minus" : "cell-sign cell-sign-plus"}>
-                    {row.isUnclassified ? "" : row.sign === 1 ? "−" : "+"}
-                  </td>
-                  <td className="cell-source">{formatRowSources(row.sources)}</td>
-                  <td className="cell-actions">
-                    {hasOverride && <button type="button" className="ghost-button button-tiny" onClick={() => revertOverride(row.항목명)} title="원래대로">↺</button>}
-                  </td>
-                </tr>
-              );
-            })}
-            {pageRows.length === 0 && (
-              <tr><td colSpan={9} style={{ textAlign: "center", color: "#9ca3af", padding: 24 }}>표시할 행이 없습니다.</td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="classification-table-pager">
-        <button type="button" className="ghost-button" disabled={safePage === 0} onClick={() => setPage(0)}>« 처음</button>
-        <button type="button" className="ghost-button" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>‹ 이전</button>
-        <span className="muted" style={{ fontSize: 13 }}>
-          {safePage + 1} / {totalPages} 페이지
-        </span>
-        <button type="button" className="ghost-button" disabled={safePage >= totalPages - 1} onClick={() => setPage(safePage + 1)}>다음 ›</button>
-        <button type="button" className="ghost-button" disabled={safePage >= totalPages - 1} onClick={() => setPage(totalPages - 1)}>끝 »</button>
-        <select className="select" value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(0); }} style={{ marginLeft: 8 }}>
-          <option value={25}>25행</option>
-          <option value={50}>50행</option>
-          <option value={100}>100행</option>
-          <option value={200}>200행</option>
-        </select>
-      </div>
-    </div>
-  );
-}
-
-// Memoized so the table doesn't re-render when unrelated parent state changes.
-export const ClassificationTableView = memo(ClassificationTableViewInner);
-
-/**
- * 결과물DB 표 (4-1 탭). 사용자가 만든 엑셀(재무제표 음양.xlsx)을 그대로 가져온
- * result-classification.ts의 632개 entry를 보여줌. 분류DB와 코드(넘버)로 연결됨.
- * 편집 불가 — 엑셀에서 관리.
- */
-function ResultClassificationTableView() {
-  const [search, setSearch] = useState("");
-  const [groupFilter, setGroupFilter] = useState<string>("");
-  const deferredSearch = useDeferredValue(search);
-
-  const groupOptions = useMemo(() => {
-    return Array.from(RESULT_BY_GROUP.keys()).sort((a, b) => a.localeCompare(b, "ko"));
-  }, []);
-
-  const filtered = useMemo(() => {
-    const q = deferredSearch.trim().toLowerCase();
-    return RESULT_CLASSIFICATION.filter((e) => {
-      if (groupFilter && e.group !== groupFilter) return false;
-      if (!q) return true;
-      return (
-        String(e.code).includes(q)
-        || e.대분류.toLowerCase().includes(q)
-        || e.중분류.toLowerCase().includes(q)
-        || e.소분류.toLowerCase().includes(q)
-        || e.세분류.toLowerCase().includes(q)
-        || (e.group ?? "").toLowerCase().includes(q)
-      );
-    });
-  }, [deferredSearch, groupFilter]);
-
-  return (
-    <section className="config-card">
-      <div className="classification-table-toolbar">
-        <input
-          className="input"
-          placeholder="코드/이름/묶음 검색"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{ minWidth: 240, flex: "0 1 320px" }}
-        />
-        <select className="select" value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)} style={{ minWidth: 180 }}>
-          <option value="">모든 묶음</option>
-          {groupOptions.map((g) => (
-            <option key={g} value={g}>{g} ({RESULT_BY_GROUP.get(g)?.length ?? 0})</option>
-          ))}
-        </select>
-        <span className="muted" style={{ marginLeft: "auto", fontSize: 12 }}>
-          전체 {RESULT_CLASSIFICATION.length.toLocaleString()} · 묶음 {RESULT_BY_GROUP.size}개 · 필터 후 {filtered.length.toLocaleString()}
-        </span>
-      </div>
-      <div className="classification-table-scroll">
-        <table className="table report-table classification-flat-table">
-          <thead>
-            <tr>
-              <th>코드</th>
-              <th>대분류</th>
-              <th>중분류</th>
-              <th>소분류</th>
-              <th>세분류</th>
-              <th>부호</th>
-              <th>묶음</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.slice(0, 200).map((e) => (
-              <tr key={e.code}>
-                <td className="cell-code">{e.code}</td>
-                <td>{e.대분류}</td>
-                <td>{e.중분류}</td>
-                <td>{e.소분류 || ""}</td>
-                <td>{e.세분류}</td>
-                <td className={e.sign === 1 ? "cell-sign cell-sign-minus" : "cell-sign cell-sign-plus"}>
-                  {e.sign === 1 ? "−" : "+"}
-                </td>
-                <td>{e.group ?? ""}</td>
-              </tr>
-            ))}
-            {filtered.length > 200 && (
-              <tr><td colSpan={7} style={{ textAlign: "center", color: "#9ca3af", padding: 12 }}>
-                상위 200건만 표시 — 검색·필터로 좁혀주세요 (전체 {filtered.length.toLocaleString()}건)
-              </td></tr>
-            )}
-            {filtered.length === 0 && (
-              <tr><td colSpan={7} style={{ textAlign: "center", color: "#9ca3af", padding: 24 }}>표시할 행이 없습니다.</td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-// Top-level tree view with expand-all / collapse-all controls.
-export function ClassificationTreeView({
-  accountEntries
-}: {
-  accountEntries: SectionAccountDbEntry[];
-}) {
-  const tree = useMemo(() => buildClassificationTree(accountEntries), [accountEntries]);
-  // Default: top-level (대분류) expanded so user sees structure at a glance
-  const [expanded, setExpanded] = useState<Set<string>>(() => {
-    const init = new Set<string>();
-    for (const node of tree) {
-      if (node.kind === "branch") init.add(node.nodeId);
-    }
-    return init;
-  });
-
-  function toggle(nodeId: string) {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(nodeId)) next.delete(nodeId);
-      else next.add(nodeId);
-      return next;
-    });
-  }
-
-  function collectAllIds(nodes: ClassificationTreeNode[], acc: Set<string>) {
-    for (const n of nodes) {
-      acc.add(n.nodeId);
-      if (n.kind === "branch") collectAllIds(n.children, acc);
-    }
-  }
-
-  function expandAll() {
-    const all = new Set<string>();
-    collectAllIds(tree, all);
-    setExpanded(all);
-  }
-
-  function collapseAll() {
-    setExpanded(new Set());
-  }
-
-  const totalLeaves = tree.reduce((acc, n) => acc + (n.kind === "branch" ? n.leafCount : 1), 0);
-  const totalEncountered = tree.reduce((acc, n) => acc + (n.kind === "branch" ? n.encounteredCount : n.encounteredCount), 0);
-
-  return (
-    <div className="classification-tree">
-      <div className="classification-tree-controls">
-        <span className="soft-badge">세분류 {totalLeaves}</span>
-        <span className="soft-badge">등장 {totalEncountered}</span>
-        <div className="inline-actions" style={{ marginLeft: "auto" }}>
-          <button type="button" className="ghost-button" onClick={expandAll}>전체 펼치기</button>
-          <button type="button" className="ghost-button" onClick={collapseAll}>전체 접기</button>
-        </div>
-      </div>
-      <ul className="tree-root">
-        {tree.map((node) => (
-          <ClassificationTreeNodeView
-            key={node.nodeId}
-            node={node}
-            expanded={expanded}
-            onToggle={toggle}
-            depth={0}
-          />
-        ))}
-      </ul>
-    </div>
-  );
-}
-
 function rowsToCapitalParents(rows: CapitalRuleRow[]) {
   return rows.reduce<Record<string, string>>((acc, row) => {
     const account = row.account.trim();
@@ -1822,14 +609,6 @@ function upsertOverrideRow(rows: OverrideRow[], nextRow: OverrideRow) {
   }
 
   return rows.map((row, rowIndex) => (rowIndex === index ? { section, keyword, sign: nextRow.sign } : row));
-}
-
-function cloneClassificationCatalog(catalog: ClassificationCatalogGroup[]) {
-  try {
-    return structuredClone(catalog);
-  } catch {
-    return structuredClone(DEFAULT_CLASSIFICATION_CATALOG);
-  }
 }
 
 function sortSavedDatasets(items: SavedQuarterSnapshot[]) {
@@ -2121,7 +900,6 @@ function parseSavedDatasets(raw: string | null): SavedQuarterSnapshot[] {
           nameEdits: { ...((item.source as { nameEdits?: Record<string, string> }).nameEdits ?? {}) },
           logicConfig: cloneLogicConfig((item.source as { logicConfig?: LogicConfig }).logicConfig ?? DEFAULT_LOGIC_CONFIG),
           companyConfigs: cloneCompanyConfigs((item.source as { companyConfigs?: CompanyConfigs }).companyConfigs ?? DEFAULT_COMPANY_CONFIGS),
-          classificationGroups: cloneClassificationGroups(sanitizeClassificationGroups((item.source as { classificationGroups?: ClassificationGroups }).classificationGroups ?? DEFAULT_CLASSIFICATION_GROUPS)),
           sessionSignFixes: cloneSessionSignFixes((item.source as { sessionSignFixes?: SessionSignFixes }).sessionSignFixes ?? {})
         }
       }));
@@ -2129,184 +907,6 @@ function parseSavedDatasets(raw: string | null): SavedQuarterSnapshot[] {
     return [];
   }
 }
-
-function configSnapshot(config: {
-  logicConfig: LogicConfig;
-  companyConfigs: CompanyConfigs;
-  classificationCatalog: ClassificationCatalogGroup[];
-  classificationGroups: ClassificationGroups;
-}) {
-  return JSON.stringify({
-    logicConfig: config.logicConfig,
-    companyConfigs: config.companyConfigs,
-    classificationCatalog: config.classificationCatalog,
-    classificationGroups: config.classificationGroups
-  });
-}
-
-function hasCustomConfig(config: {
-  logicConfig: LogicConfig;
-  companyConfigs: CompanyConfigs;
-  classificationCatalog: ClassificationCatalogGroup[];
-  classificationGroups: ClassificationGroups;
-}) {
-  return configSnapshot(config) !== configSnapshot(getDefaultPersistedState());
-}
-
-function recoverClassificationConfigFromDatasets(savedDatasets: SavedQuarterSnapshot[]) {
-  const mergedGroups = savedDatasets.reduce<ClassificationGroups>((acc, dataset) => {
-    const sourceGroups = sanitizeClassificationGroups(dataset.source.classificationGroups ?? {});
-
-    Object.entries(sourceGroups).forEach(([canonicalKey, aliases]) => {
-      acc[canonicalKey] = Array.from(new Set([...(acc[canonicalKey] ?? []), canonicalKey, ...aliases]));
-    });
-
-    return acc;
-  }, {});
-
-  const catalog = classificationGroupsToCatalog(mergedGroups);
-
-  return parsePersistedState(JSON.stringify({
-    classificationCatalog: catalog,
-    classificationGroups: mergedGroups
-  }));
-}
-
-function inferManagedClassificationKey(accountName: string, sectionKey: string) {
-  const normalizedName = accountName.trim();
-  if (!normalizedName) {
-    return "";
-  }
-
-  const exactManagedKey = MANAGED_CLASSIFICATION_KEYS.find((key) => normalizeAccountDictionaryKey(key) === normalizeAccountDictionaryKey(normalizedName));
-  if (exactManagedKey) {
-    return exactManagedKey;
-  }
-
-  for (const [canonicalKey, aliases] of Object.entries(DEFAULT_CLASSIFICATION_GROUPS)) {
-    if (!MANAGED_CLASSIFICATION_KEY_SET.has(canonicalKey)) {
-      continue;
-    }
-
-    if (aliases.some((alias) => normalizeAccountDictionaryKey(alias) === normalizeAccountDictionaryKey(normalizedName))) {
-      return canonicalKey;
-    }
-  }
-
-  if (["유동자산", "비유동자산"].includes(sectionKey)) {
-    if (/매출채권|외상매출금|받을어음/.test(normalizedName)) return "매출채권";
-    if (/재고|^상품$|^제품$|^원재료$/.test(normalizedName)) return "재고자산";
-    if (/단기대여금/.test(normalizedName)) return "단기대여금";
-    if (/선급금/.test(normalizedName)) return "선급금";
-    if (/개발비/.test(normalizedName)) return "개발비(자산)";
-    if (/현금|예금|예치금|정기예적금|외화예금/.test(normalizedName)) return "현금및현금성자산";
-    if (/단기매매증권|매도가능증권|미수금|미수수익|부가세대급금/.test(normalizedName)) return "당좌자산";
-  }
-
-  if (["유동부채", "비유동부채"].includes(sectionKey)) {
-    if (/퇴직급여충당부채|장기종업원급여부채|연차충당부채/.test(normalizedName)) return "퇴직급여충당부채";
-    if (/가수금/.test(normalizedName)) return "가수금";
-    if (/가지급금/.test(normalizedName)) return "가지급금";
-    if (/차입금|사채|리스부채|전환사채|전환우선주부채|주임종단기채무|주임종장기차입금/.test(normalizedName)) return "차입금";
-  }
-
-  if (["영업비용", "판매비와관리비"].includes(sectionKey)) {
-    if (/사용권자산.*상각|리스.*감가상각/.test(normalizedName)) return "감가상각비계";
-    if (/무형.*상각|판권.*상각/.test(normalizedName)) return "감가상각비계";
-    if (/감가상각비/.test(normalizedName)) return "감가상각비계";
-    if (/급여|상여|잡급|잡금|인건비|퇴직급여|주식보상비용/.test(normalizedName)) return "인건비";
-    if (/연구|개발비/.test(normalizedName)) return "연구개발비";
-    if (/접대비|업무추진비/.test(normalizedName)) return "접대비";
-    if (/복리후생비/.test(normalizedName)) return "복리후생비";
-    if (/광고|선전/.test(normalizedName)) return "광고선전비";
-    if (/지급수수료|수수료/.test(normalizedName)) return "지급수수료";
-    if (/외주|용역/.test(normalizedName)) return "외주용역비";
-    if (/임차료|임대료/.test(normalizedName)) return "임차료";
-    if (/배송비|포장비|운반비|차량유지비|수출제비용|여비|교통|출장|통신비|세금과공과|공과금|도서인쇄|인쇄비|소모품|사무용품|대손|판촉|판매촉진|대외협력|행사비|기술이전|경상기술|전산운영|시스템운영|전산비|반품|촬영경비/.test(normalizedName)) return "변동비";
-  }
-
-  if (sectionKey === "영업외비용") {
-    if (/이자비용|금융비용/.test(normalizedName)) return "이자비용";
-  }
-
-  return "";
-}
-
-function applyManagedAssignmentsFromSavedDatasets(
-  config: {
-    logicConfig: LogicConfig;
-    companyConfigs: CompanyConfigs;
-    classificationCatalog: ClassificationCatalogGroup[];
-    classificationGroups: ClassificationGroups;
-  },
-  savedDatasets: SavedQuarterSnapshot[]
-) {
-  const accountEntries = extractAccountDictionaryEntries(savedDatasets);
-  const lookup = buildManagedClassificationLookup(config.classificationCatalog);
-  let changed = false;
-
-  const nextCatalog = config.classificationCatalog.map((group) => ({
-    ...group,
-    aliases: [...group.aliases]
-  }));
-
-  accountEntries.forEach((entry) => {
-    if (resolveManagedClassification(entry.accountName, lookup)) {
-      return;
-    }
-
-    const inferredKey = inferManagedClassificationKey(entry.accountName, entry.sectionKey);
-    if (!inferredKey) {
-      return;
-    }
-
-    const targetGroup = nextCatalog.find((group) => group.canonicalKey.trim() === inferredKey);
-    if (!targetGroup) {
-      return;
-    }
-
-    const normalizedEntryKey = normalizeAccountDictionaryKey(entry.accountName);
-    const appendAliasToGroup = (groupKey: string) => {
-      const group = nextCatalog.find((item) => item.canonicalKey.trim() === groupKey);
-      if (!group) {
-        return;
-      }
-
-      const alreadyIncluded = sanitizeClassificationAliases(group.aliases)
-        .some((alias) => normalizeAccountDictionaryKey(alias) === normalizedEntryKey);
-      if (alreadyIncluded) {
-        return;
-      }
-
-      group.aliases = Array.from(new Set([...sanitizeClassificationAliases(group.aliases), entry.accountName]));
-      changed = true;
-    };
-
-    appendAliasToGroup(inferredKey);
-
-    if (["인건비", "연구개발비", "광고선전비", "접대비", "복리후생비", "지급수수료", "외주용역비", "임차료", "변동비"].includes(inferredKey)) {
-      appendAliasToGroup("변동비");
-    }
-  });
-
-  if (!changed) {
-    return {
-      nextConfig: config,
-      changed: false
-    };
-  }
-
-  const normalizedCatalog = mergeDefaultClassificationCatalog(nextCatalog);
-  return {
-    nextConfig: {
-      ...config,
-      classificationCatalog: normalizedCatalog,
-      classificationGroups: classificationCatalogToGroups(normalizedCatalog)
-    },
-    changed: true
-  };
-}
-
 
 type UserRole = "creator" | "admin" | "manager";
 
@@ -2375,8 +975,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   const [selectedCompany, setSelectedCompany] = useState("");
   const [logicConfig, setLogicConfig] = useState<LogicConfig>(cloneLogicConfig(DEFAULT_LOGIC_CONFIG));
   const [companyConfigs, setCompanyConfigs] = useState<CompanyConfigs>(cloneCompanyConfigs(DEFAULT_COMPANY_CONFIGS));
-  const [classificationGroups, setClassificationGroups] = useState<ClassificationGroups>(cloneClassificationGroups(DEFAULT_CLASSIFICATION_GROUPS));
-  const [classificationCatalog, setClassificationCatalog] = useState<ClassificationCatalogGroup[]>(cloneClassificationCatalog(DEFAULT_CLASSIFICATION_CATALOG));
   const [pasteEdits, setPasteEdits] = useState<Record<string, number>>({});
   const [nameEdits, setNameEdits] = useState<Record<string, string>>({});
   const [sessionSignFixes, setSessionSignFixes] = useState<SessionSignFixes>({});
@@ -2391,10 +989,8 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       aliases: aliases.filter((a) => a !== parent).join(", ")
     }))
   );
-  const [classificationHistory, setClassificationHistory] = useState<ClassificationCatalogGroup[][]>([]);
   const [configRulesHistory, setConfigRulesHistory] = useState<ConfigRulesSnapshot[]>([]);
   const configRulesSnapshotPendingRef = useRef(false);
-  const [classificationSyncMessage, setClassificationSyncMessage] = useState<string | null>(null);
   const [resultOpenState, setResultOpenState] = useState<Record<string, boolean>>({});
   const [savedDatasets, setSavedDatasets] = useState<SavedQuarterSnapshot[]>(initialDatasets ?? []);
   const [consistencyResults, setConsistencyResults] = useState<Array<{
@@ -2420,7 +1016,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   const [activeIndustryEditor, setActiveIndustryEditor] = useState<string | null>(null);
   const [dataEditMode, setDataEditMode] = useState(false);
   const [statementType, setStatementType] = useState<"별도" | "연결">("별도");
-  const [classificationSaveState, setClassificationSaveState] = useState<"idle" | "saved">("idle");
   const [datasetActionState, setDatasetActionState] = useState<"idle" | "saving" | "deleting" | "restoring" | "purging">("idle");
   const [configApplyState, setConfigApplyState] = useState<"idle" | "applying" | "applied">("idle");
   const [sharedStateReady, setSharedStateReady] = useState(false);
@@ -2496,45 +1091,8 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
             .catch(() => {});
         }
         const remotePersisted = parsePersistedState(JSON.stringify(remote.config));
-        const recoveredPersisted = recoverClassificationConfigFromDatasets(remoteSaved);
-        const shouldRecoverRemoteClassification = !hasCustomConfig(remotePersisted) && hasCustomConfig(recoveredPersisted);
-        const { nextConfig: autoAssignedRemotePersisted, changed: autoAssignedChanged } = applyManagedAssignmentsFromSavedDatasets(
-          shouldRecoverRemoteClassification
-            ? {
-                ...remotePersisted,
-                classificationCatalog: recoveredPersisted.classificationCatalog,
-                classificationGroups: recoveredPersisted.classificationGroups
-              }
-            : remotePersisted,
-          remoteSaved
-        );
-
-        if (shouldRecoverRemoteClassification || autoAssignedChanged) {
-          const mergedConfig = autoAssignedRemotePersisted;
-
-          const migrationResponse = await fetch("/api/shared-state", {
-            method: "PUT",
-            headers: {
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              config: mergedConfig
-            })
-          });
-
-          if (!migrationResponse.ok) {
-            const payload = await migrationResponse.json().catch(() => null) as { error?: string } | null;
-            throw new Error(payload?.error ?? "공용 데이터 마이그레이션에 실패했습니다.");
-          }
-
-          setSharedStateError(null);
-
-          nextPersisted = mergedConfig;
-          nextSaved = remoteSaved;
-        } else {
-          nextPersisted = remotePersisted;
-          nextSaved = remoteSaved;
-        }
+        nextPersisted = remotePersisted;
+        nextSaved = remoteSaved;
       } catch (error) {
         setSharedStateError(error instanceof Error ? error.message : "공용 데이터 연결 중 오류가 발생했습니다.");
       }
@@ -2545,8 +1103,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
 
       setLogicConfig(cloneLogicConfig(nextPersisted.logicConfig));
       setCompanyConfigs(cloneCompanyConfigs(nextPersisted.companyConfigs));
-      setClassificationGroups(cloneClassificationGroups(nextPersisted.classificationGroups));
-      setClassificationCatalog(cloneClassificationCatalog(nextPersisted.classificationCatalog));
       setGlobalOverrideRows(overridesToRows(nextPersisted.logicConfig.sectionSignOverrides));
       setPasteSectionRows(objectEntriesToRows(nextPersisted.logicConfig.pasteSectToParent));
       setCapitalRuleRows(capitalRulesToRows(nextPersisted.logicConfig.capitalL1Signs, nextPersisted.logicConfig.capitalL1Parent));
@@ -2583,7 +1139,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          config: { logicConfig, companyConfigs, classificationCatalog, classificationGroups }
+          config: { logicConfig, companyConfigs }
         })
       })
         .then(async (response) => {
@@ -2598,7 +1154,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     }, 600);
 
     return () => window.clearTimeout(timeout);
-  }, [mounted, sharedStateReady, logicConfig, companyConfigs, classificationCatalog, classificationGroups]);
+  }, [mounted, sharedStateReady, logicConfig, companyConfigs]);
 
   useEffect(() => {
     if (!mounted || !sharedStateReady) {
@@ -2613,7 +1169,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     sheetsAutoSyncInitializedRef.current = true;
 
     const timeout = window.setTimeout(() => {
-      const payload = buildSheetsSyncPayload(savedDatasets, classificationGroups, classificationCatalog, accountTreeLookup ? { logicConfig, companyConfigs, classificationGroups, accountTreeLookup } : undefined);
+      const payload = buildSheetsSyncPayload(savedDatasets, accountTreeLookup ? { logicConfig, companyConfigs, accountTreeLookup } : undefined);
       if (!payload.quarterTabs.length) return;
       setSheetsSyncState({ status: "syncing", message: "페이지 로드 → 시트 자동 동기화 중..." });
       postSheetsSync(payload)
@@ -2779,10 +1335,9 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
         pasteEdits,
         nameEdits,
         sessionSignFixes,
-        classificationCatalog,
         accountTreeLookup: accountTreeLookup ?? undefined
       }),
-    [pastedText, selectedCompany, tolerance, logicConfig, companyConfigs, pasteEdits, nameEdits, sessionSignFixes, classificationCatalog, accountTreeLookup]
+    [pastedText, selectedCompany, tolerance, logicConfig, companyConfigs, pasteEdits, nameEdits, sessionSignFixes, accountTreeLookup]
   );
   const accountDictionaryEntries = useMemo(() => extractAccountDictionaryEntries(savedDatasets), [savedDatasets]);
   // 4.분류DB 탭 출처·미분류: 저장 OCR 계정을 계정트리에 대조한다.
@@ -2868,14 +1423,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       setActiveTab("validate");
     }
   }
-  const managedClassificationLookup = useMemo(
-    () => buildManagedClassificationLookup(classificationCatalog),
-    [classificationCatalog]
-  );
-  const managedClassificationOptions = useMemo(
-    () => MANAGED_CLASSIFICATION_KEYS.filter((key) => classificationCatalog.some((group) => group.canonicalKey.trim() === key)),
-    [classificationCatalog]
-  );
   const reporting = useMemo(
     () => {
       const reportArgs = {
@@ -2884,86 +1431,19 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
         tolerance,
         logicConfig,
         companyConfigs,
-        classificationGroups,
-        classificationCatalog,
         pasteEdits,
         nameEdits,
-        sessionSignFixes
+        sessionSignFixes,
+        accountTreeLookup: accountTreeLookup ?? undefined
       };
       return buildReportingModel(reportArgs);
     },
-    [pastedText, selectedCompany, tolerance, logicConfig, companyConfigs, classificationGroups, classificationCatalog, pasteEdits, nameEdits, sessionSignFixes]
-  );
-  const accountDictionarySectionGroups = useMemo(
-    () => {
-      const grouped = accountDictionaryEntries.reduce((acc, entry) => {
-        const items = acc.get(entry.sectionKey) ?? [];
-        items.push(entry);
-        acc.set(entry.sectionKey, items);
-        return acc;
-      }, new Map<string, SectionAccountDbEntry[]>());
-
-      return Object.keys(ACCOUNT_DB_SECTIONS)
-        .map((sectionKey) => [sectionKey, grouped.get(sectionKey) ?? []] as const)
-        .filter(([, entries]) => entries.length > 0);
-    },
-    [accountDictionaryEntries]
-  );
-  const classifiedAccountDictionaryCount = useMemo(
-    () => accountDictionaryEntries.filter((entry) => resolveManagedClassification(entry.accountName, managedClassificationLookup)).length,
-    [accountDictionaryEntries, managedClassificationLookup]
+    [pastedText, selectedCompany, tolerance, logicConfig, companyConfigs, pasteEdits, nameEdits, sessionSignFixes, accountTreeLookup]
   );
   const activeAccountDbPreviewDataset = useMemo(
     () => savedDatasets.find((item) => item.id === activeAccountDbPreview?.datasetId) ?? null,
     [activeAccountDbPreview, savedDatasets]
   );
-
-  // Stable callback so ClassificationTableView memo isn't broken by inline closures.
-  const handleClassificationOverrides = useCallback((overrides: Map<string, AliasOverride>) => {
-    if (!overrides.size) return;
-    const nextCatalog = applyAliasOverridesToCatalog(classificationCatalog, overrides);
-    applyClassificationCatalog(nextCatalog, true);
-  }, [classificationCatalog]);
-
-  /**
-   * One-click "분류DB에 영구 반영" from the validation diagnosis card.
-   * Locates the seed pair (same 세분류 with opposite sign) and moves the alias
-   * to the correctly-signed entry. Then persists via the standard catalog flow.
-   */
-  function applySeedFix(_sect: string, acct: string, newSign: SignCode) {
-    if (newSign === 2) {
-      window.alert("'제외' 부호는 분류DB에 박을 수 없습니다. 회사별 규칙으로 처리하세요.");
-      return;
-    }
-    const current = findEntryByAlias(acct);
-    if (!current) {
-      window.alert(`'${acct}'은(는) 분류DB에 없는 항목입니다.\n먼저 4. 분류DB 탭에서 추가/분류해주세요.`);
-      return;
-    }
-    if (current.sign === newSign) return;
-
-    // Locate paired code (same 세분류 with opposite sign). Code suffix layout:
-    // positive at xxxx000, negative at xxxx100 — toggle by ±100.
-    const pairedCode = newSign === 1 ? current.code + 100 : current.code - 100;
-    const paired = CLASSIFICATION_ENTRIES.find((e) => e.code === pairedCode && e.sign === newSign);
-    if (!paired) {
-      window.alert(`'${acct}'은(는) 분류DB에 반대 부호 짝이 없어 자동 반영할 수 없습니다.\n4. 분류DB 탭에서 수동으로 처리해주세요.`);
-      return;
-    }
-
-    const overrides = new Map<string, AliasOverride>();
-    overrides.set(acct, {
-      code: paired.code,
-      대분류: paired.대분류,
-      중분류: paired.중분류,
-      소분류: paired.소분류,
-      세분류: paired.세분류,
-      sign: paired.sign
-    });
-    const nextCatalog = applyAliasOverridesToCatalog(classificationCatalog, overrides);
-    applyClassificationCatalog(nextCatalog, true);
-    applySessionFix(_sect, acct, newSign); // also reflect immediately in current validation
-  }
 
   const companyKnown = Boolean(selectedCompany.trim() && companyConfigs[selectedCompany.trim()]);
   const sessionFixCount = countSessionFixes(sessionSignFixes);
@@ -3002,11 +1482,11 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
         ? savedDatasets.filter((item) => item.companyName === selectedDataset.companyName)
         : [];
       const reportSnaps = accountTreeLookup
-        ? rebuildSnapshotsWithTree(snaps, { logicConfig, companyConfigs, classificationGroups, accountTreeLookup })
+        ? rebuildSnapshotsWithTree(snaps, { logicConfig, companyConfigs, accountTreeLookup })
         : snaps;
-      return buildCompanyReport(reportSnaps, classificationGroups);
+      return buildCompanyReport(reportSnaps);
     },
-    [selectedDataset, savedDatasets, classificationGroups, accountTreeLookup, logicConfig, companyConfigs]
+    [selectedDataset, savedDatasets, accountTreeLookup, logicConfig, companyConfigs]
   );
   const selectedReportPeriod = useMemo(
     () => selectedDataset
@@ -3024,9 +1504,8 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
         const companySnaps = savedDatasets.filter((item) => item.companyName === dataset.companyName);
         const model = buildCompanyReport(
           accountTreeLookup
-            ? rebuildSnapshotsWithTree(companySnaps, { logicConfig, companyConfigs, classificationGroups, accountTreeLookup })
-            : companySnaps,
-          classificationGroups
+            ? rebuildSnapshotsWithTree(companySnaps, { logicConfig, companyConfigs, accountTreeLookup })
+            : companySnaps
         );
         return {
           slotId: selection.slotId,
@@ -3038,43 +1517,13 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
         } satisfies ComparisonColumn;
       })
       .filter((item): item is ComparisonColumn => item !== null),
-    [comparisonSelections, savedDatasets, classificationGroups, accountTreeLookup, logicConfig, companyConfigs]
+    [comparisonSelections, savedDatasets, accountTreeLookup, logicConfig, companyConfigs]
   );
   const comparisonCompanyOptions = useMemo(
     () => Array.from(new Set(savedDatasets.map((item) => item.companyName))),
     [savedDatasets]
   );
-  const editableClassificationCatalog = useMemo(
-    () => classificationCatalog
-      .map((group, index) => ({ group, index }))
-      .filter(({ group }) => MANAGED_CLASSIFICATION_KEY_SET.has(group.canonicalKey.trim())),
-    [classificationCatalog]
-  );
   const industryOptions = useMemo(() => Array.from(DEFAULT_INDUSTRY_OPTIONS), []);
-  const classificationParentLabels = useMemo(() => {
-    const relations = new Map<string, string[]>();
-
-    classificationCatalog.forEach((group) => {
-      const parentLabel = group.canonicalKey.trim();
-      if (!parentLabel) {
-        return;
-      }
-
-      sanitizeClassificationAliases(group.aliases).forEach((alias) => {
-        const childKey = alias.trim();
-        if (!childKey || normalizeAccountDictionaryKey(childKey) === normalizeAccountDictionaryKey(parentLabel)) {
-          return;
-        }
-
-        const existing = relations.get(normalizeAccountDictionaryKey(childKey)) ?? [];
-        if (!existing.includes(parentLabel)) {
-          relations.set(normalizeAccountDictionaryKey(childKey), [...existing, parentLabel]);
-        }
-      });
-    });
-
-    return relations;
-  }, [classificationCatalog]);
 
   // pasteEdits를 의존성에 넣고 setPasteEdits를 호출하면, normalize 결과가
   // 입력과 미세하게라도 달라지는 순간 무한 리렌더에 빠진다(매 루프마다 거대
@@ -3087,8 +1536,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
         selectedCompany,
         logicConfig,
         companyConfigs,
-        classificationGroups,
-        classificationCatalog,
         accountTreeLookup: accountTreeLookup ?? undefined,
         pasteEdits: prev,
         nameEdits,
@@ -3097,7 +1544,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       return JSON.stringify(normalized) !== JSON.stringify(prev) ? normalized : prev;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pastedText, selectedCompany, logicConfig, companyConfigs, classificationGroups, classificationCatalog, nameEdits, sessionSignFixes, accountTreeLookup]);
+  }, [pastedText, selectedCompany, logicConfig, companyConfigs, nameEdits, sessionSignFixes, accountTreeLookup]);
 
   function resetAdjustments() {
     setPasteEdits({});
@@ -3116,8 +1563,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       tolerance,
       logicConfig,
       companyConfigs,
-      classificationGroups,
-      classificationCatalog,
       accountTreeLookup: accountTreeLookup ?? undefined,
       pasteEdits,
       nameEdits,
@@ -3161,7 +1606,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       setActiveTab("data");
 
       // Use freshly-saved data (nextSaved) — React state may not have propagated yet.
-      const sheetsPayload = buildSheetsSyncPayload(nextSaved, classificationGroups, classificationCatalog, accountTreeLookup ? { logicConfig, companyConfigs, classificationGroups, accountTreeLookup } : undefined);
+      const sheetsPayload = buildSheetsSyncPayload(nextSaved, accountTreeLookup ? { logicConfig, companyConfigs, accountTreeLookup } : undefined);
       if (sheetsPayload.quarterTabs.length) {
         setSheetsSyncState({ status: "syncing", message: "저장 후 시트 동기화 중..." });
         postSheetsSync(sheetsPayload)
@@ -3214,61 +1659,10 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     return data?.error ?? "구글시트 동기화 실패";
   }
 
-  async function syncClassificationDbOnly() {
-    setSheetsSyncState({ status: "syncing", message: "분류DB 동기화 중..." });
-    try {
-      const accountOccurrences = collectAccountOccurrences(savedDatasets);
-      const classificationDbTab = buildClassificationDbTab(accountOccurrences, classificationCatalog);
-      const data = await postSheetsSync({ quarterTabs: [classificationDbTab] });
-      if (data?.ok) {
-        setSheetsSyncState({
-          status: "ok",
-          message: `분류DB 시트 갱신 완료 (행 ${data.rowsTotal ?? classificationDbTab.rows.length})`
-        });
-        window.setTimeout(
-          () => setSheetsSyncState((prev) => prev.status === "ok" ? { status: "idle" } : prev),
-          4000
-        );
-      } else {
-        setSheetsSyncState({ status: "error", message: describeSheetsError(data) });
-      }
-    } catch (err) {
-      setSheetsSyncState({
-        status: "error",
-        message: err instanceof Error ? err.message : "구글시트 동기화 실패"
-      });
-    }
-  }
-
-  async function syncClassificationDbResetOnly() {
-    setSheetsSyncState({ status: "syncing", message: "분류DB 재설정 시트 생성 중..." });
-    try {
-      const resetTab = buildClassificationDbResetTab(savedDatasets);
-      const data = await postSheetsSync({ quarterTabs: [resetTab] });
-      if (data?.ok) {
-        setSheetsSyncState({
-          status: "ok",
-          message: `분류DB_재설정 시트 갱신 완료 (행 ${data.rowsTotal ?? resetTab.rows.length})`
-        });
-        window.setTimeout(
-          () => setSheetsSyncState((prev) => prev.status === "ok" ? { status: "idle" } : prev),
-          4000
-        );
-      } else {
-        setSheetsSyncState({ status: "error", message: describeSheetsError(data) });
-      }
-    } catch (err) {
-      setSheetsSyncState({
-        status: "error",
-        message: err instanceof Error ? err.message : "구글시트 동기화 실패"
-      });
-    }
-  }
-
   async function bulkSyncSheets() {
     setSheetsSyncState({ status: "syncing", message: "전체 동기화 중..." });
     try {
-      const payload = buildSheetsSyncPayload(savedDatasets, classificationGroups, classificationCatalog, accountTreeLookup ? { logicConfig, companyConfigs, classificationGroups, accountTreeLookup } : undefined);
+      const payload = buildSheetsSyncPayload(savedDatasets, accountTreeLookup ? { logicConfig, companyConfigs, accountTreeLookup } : undefined);
       if (!payload.quarterTabs.length) {
         setSheetsSyncState({ status: "error", message: "저장된 분기 데이터가 없습니다." });
         return;
@@ -3333,8 +1727,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       selectedCompany: dataset.companyName,
       logicConfig,
       companyConfigs,
-      classificationGroups,
-      classificationCatalog,
       accountTreeLookup: accountTreeLookup ?? undefined,
       pasteEdits: dataset.source.pasteEdits,
       nameEdits: dataset.source.nameEdits ?? {},
@@ -3817,164 +2209,13 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       selectedCompany,
       logicConfig,
       companyConfigs,
-      classificationGroups,
-      classificationCatalog,
       accountTreeLookup: accountTreeLookup ?? undefined,
       pasteEdits: prev,
       nameEdits,
       sessionSignFixes: nextSessionSignFixes
     }));
-
-    // Also try to persist into the classification DB so the change isn't lost
-    // on the next validation. Silent on failure (no seed pair exists for this alias)
-    // — the session fix above still keeps the current validation passing.
-    if (nextSign === 0 || nextSign === 1) {
-      const current = findEntryByAlias(acct, sect);
-      if (current && current.sign !== nextSign) {
-        const pairedCode = nextSign === 1 ? current.code + 100 : current.code - 100;
-        const paired = CLASSIFICATION_ENTRIES.find((e) => e.code === pairedCode && e.sign === nextSign);
-        if (paired) {
-          const overrides = new Map<string, AliasOverride>();
-          overrides.set(acct, {
-            code: paired.code,
-            대분류: paired.대분류,
-            중분류: paired.중분류,
-            소분류: paired.소분류,
-            세분류: paired.세분류,
-            sign: paired.sign
-          });
-          const nextCatalog = applyAliasOverridesToCatalog(classificationCatalog, overrides);
-          applyClassificationCatalog(nextCatalog, false);
-        }
-      }
-    }
-  }
-
-  function applyClassificationCatalog(nextCatalog: ClassificationCatalogGroup[], showFeedback = false) {
-    const clonedCatalog = mergeDefaultClassificationCatalog(cloneClassificationCatalog(nextCatalog)).map((item) => ({
-      ...item,
-      groupId: item.groupId.trim(),
-      majorCategory: item.majorCategory.trim(),
-      middleCategory: item.middleCategory.trim(),
-      smallCategory: item.smallCategory.trim(),
-      sign: item.sign.trim(),
-      canonicalKey: item.canonicalKey.trim(),
-      aliases: sanitizeClassificationAliases(item.aliases)
-    })).filter((item) => item.canonicalKey);
-    const nextGroups = classificationCatalogToGroups(clonedCatalog);
-    setClassificationCatalog(clonedCatalog);
-    setClassificationGroups(nextGroups);
-    setClassificationHistory([]);
-
-    if (showFeedback) {
-      setClassificationSaveState("saved");
-      window.setTimeout(() => setClassificationSaveState("idle"), 1800);
-      // Explicit save → also re-sync stored datasets so their signs follow
-      // the new 분류DB without the user having to re-open and re-save each one.
-      void syncStoredDatasetsToClassificationDB(clonedCatalog, nextGroups);
-    }
-  }
-
-  /**
-   * Re-build every saved dataset's statement rows against the current 분류DB
-   * and push only the ones whose signs actually changed back to Supabase.
-   * No-op when nothing changes.
-   *
-   * Chunked + yielded so a large dataset list doesn't lock the main thread
-   * (each buildQuarterSnapshots call re-parses the paste). Progress shows in
-   * the hero; the rest of the UI stays interactive in the meantime.
-   */
-  async function syncStoredDatasetsToClassificationDB(
-    catalogOverride?: ClassificationCatalogGroup[],
-    groupsOverride?: ClassificationGroups,
-    forceAll: boolean = false,
-    logicConfigOverride?: LogicConfig,
-    companyConfigsOverride?: CompanyConfigs
-  ) {
-    if (!savedDatasets.length) return;
-    const effectiveCatalog = catalogOverride ?? classificationCatalog;
-    const effectiveGroups = groupsOverride ?? classificationGroups;
-    const effectiveLogicConfig = logicConfigOverride ?? logicConfig;
-    const effectiveCompanyConfigs = companyConfigsOverride ?? companyConfigs;
-    const total = savedDatasets.length;
-    const changedSnapshots: SavedQuarterSnapshot[] = [];
-    const yieldToMain = () => new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-    const CHUNK = 5;
-
-    setClassificationSyncMessage(`저장 데이터 동기화 중... 0 / ${total}`);
-
-    for (let i = 0; i < total; i += CHUNK) {
-      const slice = savedDatasets.slice(i, i + CHUNK);
-      for (const dataset of slice) {
-        const fresh = buildQuarterSnapshots({
-          pastedText: dataset.source.pastedText,
-          selectedCompany: dataset.companyName,
-          tolerance: dataset.source.tolerance ?? 0,
-          logicConfig: effectiveLogicConfig,
-          companyConfigs: effectiveCompanyConfigs,
-          classificationGroups: effectiveGroups,
-          classificationCatalog: effectiveCatalog,
-          pasteEdits: dataset.source.pasteEdits ?? {},
-          nameEdits: dataset.source.nameEdits ?? {},
-          sessionSignFixes: {},
-          statementType: dataset.source.statementType
-        });
-        const matched = fresh.find((s) => s.id === dataset.id);
-        if (!matched) continue;
-        const changed =
-          forceAll
-          || matched.adjustedStatementRows.length !== dataset.adjustedStatementRows.length
-          || matched.adjustedStatementRows.some((newRow, idx) => {
-            const oldRow = dataset.adjustedStatementRows[idx];
-            // 부호 변화뿐 아니라 code 변화도 동기화 대상 — 옛 데이터(code 없음)에
-            // code를 채우는 1회 마이그레이션이 이 비교로 트리거된다.
-            return !oldRow
-              || oldRow.signFlag !== newRow.signFlag
-              || (oldRow.code ?? null) !== (newRow.code ?? null);
-          });
-        if (changed) changedSnapshots.push(matched);
-      }
-      const done = Math.min(i + CHUNK, total);
-      setClassificationSyncMessage(`저장 데이터 동기화 중... ${done} / ${total}`);
-      // Hand the main thread back so clicks/scroll stay responsive.
-      await yieldToMain();
-    }
-
-    if (!changedSnapshots.length) {
-      setClassificationSyncMessage(null);
-      return;
-    }
-
-    try {
-      // 변경된 스냅샷을 한 번에 PUT하면 payload가 커서 413으로 실패한다.
-      // 작은 배치로 나눠 보내 — 각 PUT은 부분 배열만 upsert하고,
-      // 응답은 항상 전체 datasets라 마지막 응답을 최종 상태로 쓴다.
-      const PUT_CHUNK = 5;
-      let latest: ReturnType<typeof parseDatasetApiResponse> | null = null;
-      for (let i = 0; i < changedSnapshots.length; i += PUT_CHUNK) {
-        const batch = changedSnapshots.slice(i, i + PUT_CHUNK);
-        const done = Math.min(i + PUT_CHUNK, changedSnapshots.length);
-        setClassificationSyncMessage(`${changedSnapshots.length}개 중 ${done}개 저장 중...`);
-        const response = await fetch("/api/datasets", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ snapshots: batch, validatedText: "" })
-        });
-        if (!response.ok) {
-          setClassificationSyncMessage(null);
-          return;
-        }
-        latest = parseDatasetApiResponse(await response.json() as DatasetApiResponse);
-      }
-      if (latest) {
-        setSavedDatasets(latest.datasets);
-        setTrashedDatasets(latest.trashedDatasets);
-      }
-      setClassificationSyncMessage(`분류DB 기준으로 ${changedSnapshots.length}개 저장 데이터를 자동 갱신했습니다.`);
-      window.setTimeout(() => setClassificationSyncMessage(null), 5000);
-    } catch {
-      setClassificationSyncMessage(null);
-    }
+    // 분류는 구글시트(계정트리)에서만 한다 — 부호 세션 수정은 현재 검증에만
+    // 반영되고, 영구 반영은 트리 편집 후 「시트에서 동기화」로 처리한다.
   }
 
   async function runConsistencyCheck() {
@@ -4006,8 +2247,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
             selectedCompany: dataset.companyName,
             logicConfig,
             companyConfigs,
-            classificationGroups,
-            classificationCatalog,
             accountTreeLookup: accountTreeLookup ?? undefined,
             pasteEdits: dataset.source.pasteEdits ?? {},
             nameEdits: dataset.source.nameEdits ?? {},
@@ -4022,10 +2261,9 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
             pasteEdits: reNormalizedPasteEdits,
             nameEdits: dataset.source.nameEdits ?? {},
             // Drop stored sessionSignFixes — this check answers "does the data
-            // pass under the *current* 분류DB?". Historical overrides would
+            // pass under the *current* 분류DB(계정트리)?". Historical overrides would
             // hide that.
             sessionSignFixes: {},
-            classificationCatalog,
             accountTreeLookup: accountTreeLookup ?? undefined
           });
 
@@ -4067,23 +2305,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     }
   }
 
-  function updateClassificationCatalog(updater: (prev: ClassificationCatalogGroup[]) => ClassificationCatalogGroup[]) {
-    setClassificationCatalog((prev) => {
-      setClassificationHistory((history) => [...history, prev]);
-      return updater(prev);
-    });
-  }
-
-  function undoClassificationEdit() {
-    setClassificationHistory((prev) => {
-      const last = prev[prev.length - 1];
-      if (!last) {
-        return prev;
-      }
-      setClassificationCatalog(last);
-      return prev.slice(0, -1);
-    });
-  }
 
   function pushConfigRulesSnapshot() {
     if (configRulesSnapshotPendingRef.current) {
@@ -4236,41 +2457,11 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       });
     }
 
-    applyClassificationCatalog(classificationCatalog);
     window.setTimeout(() => setConfigApplyState("applied"), 250);
     window.setTimeout(() => setConfigApplyState("idle"), 1800);
   }
 
-  function assignAccountDbClassification(accountName: string, nextCanonicalKey: string) {
-    const normalizedAccountName = accountName.trim();
-    if (!normalizedAccountName) {
-      return;
-    }
-
-    const nextCatalog = classificationCatalog.map((group) => {
-      const canonicalKey = group.canonicalKey.trim();
-      if (!MANAGED_CLASSIFICATION_KEY_SET.has(canonicalKey)) {
-        return group;
-      }
-
-      const aliases = sanitizeClassificationAliases(group.aliases).filter((alias) => normalizeAccountDictionaryKey(alias) !== normalizeAccountDictionaryKey(normalizedAccountName));
-      if (canonicalKey !== nextCanonicalKey) {
-        return {
-          ...group,
-          aliases
-        };
-      }
-
-      return {
-        ...group,
-        aliases: Array.from(new Set([...aliases, normalizedAccountName]))
-      };
-    });
-
-    applyClassificationCatalog(nextCatalog, true);
-  }
-
-  const configPayload = JSON.stringify({ logicConfig, companyConfigs, classificationCatalog, classificationGroups }, null, 2);
+  const configPayload = JSON.stringify({ logicConfig, companyConfigs }, null, 2);
 
   function buildInputBreakdown(periodKey: string, input: MetricCalculationInput) {
     if (input.components && input.components.length) {
@@ -4390,7 +2581,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
           <span className="pill">3. 값/부호 바로 수정</span>
         </div>
         {sharedStateError ? <p className="save-feedback warning">{sharedStateError}</p> : null}
-        {classificationSyncMessage ? <p className="save-feedback">{classificationSyncMessage}</p> : null}
       </section>
 
       <section className="summary-strip">
@@ -4438,7 +2628,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
               <button className={`side-nav-item tab-highlighted ${activeTab === "report" ? "active" : ""}`} onClick={() => setActiveTab("report")}>3. 결과물</button>
               <button className={`side-nav-item ${activeTab === "formulas" ? "active" : ""} ${!canEditConfig ? "is-locked" : ""}`} onClick={() => canEditConfig && setActiveTab("formulas")} disabled={!canEditConfig} title={!canEditConfig ? "관리자만 수정 가능합니다" : undefined}>3-1. 수식</button>
               <button className={`side-nav-item tab-highlighted ${activeTab === "account-db" ? "active" : ""} ${!canEditConfig ? "is-locked" : ""}`} onClick={() => canEditConfig && setActiveTab("account-db")} disabled={!canEditConfig} title={!canEditConfig ? "관리자만 수정 가능합니다" : undefined}>4. 분류DB</button>
-              <button className={`side-nav-item ${activeTab === "result-db" ? "active" : ""}`} onClick={() => setActiveTab("result-db")}>4-1. 결과물DB</button>
             </div>
             <div className="side-nav-divider" />
             <div className="side-nav-utils">
@@ -4507,8 +2696,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
                             ? `삭제된 데이터 ${trashedDatasets.length}건이 휴지통에 있습니다. 필요하면 복구하고, 정말 필요 없을 때만 완전삭제하세요.`
                           : activeTab === "report"
                               ? `${selectedDataset ? `${selectedDataset.companyName} ${selectedDataset.quarterLabel}` : "저장된 데이터"} 기준으로 결과물을 생성합니다. 먼저 OCR검증에서 저장하기를 누르세요.`
-                            : activeTab === "classify"
-                              ? "표준 항목별 분류를 카드 형태로 수정할 수 있습니다. 계정명 추가/삭제 후 저장하면 이후 계산에 바로 반영됩니다."
                     : activeTab === "formulas"
                       ? "결과물 계산에 쓰는 기준 수식을 그대로 정리했습니다."
                       : activeTab === "account-db"
@@ -4522,6 +2709,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
         <section className="panel main-panel">
           {activeTab === "validate" && (
             <>
+              {!accountTreeLookup && <div className="notice">분류DB(계정트리) 로딩 중… 분류·부호 판정은 트리 로드 후 표시됩니다.</div>}
               {!pastedText.trim() && <div className="notice input-helper">OCR 3행 텍스트를 왼쪽 입력창에 붙여넣으면 검증 결과가 나타납니다.</div>}
               {validation.parsed.error && pastedText.trim() && <div className="notice">{validation.parsed.error}</div>}
 
@@ -4745,11 +2933,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
                                             </div>
                                             <div className="pre diagnosis-copy">{renderDiagnosisText(action.shortText ?? action.text)}</div>
                                             {action.edit ? <div className="inline-actions" style={{ marginTop: 12 }}><button className="secondary-button" onClick={() => applySuggestedEdit(action.edit!.row, action.edit!.col, action.edit!.value)}>{action.editLabel}</button></div> : null}
-                                            {action.fix ? (
-                                              <div className="inline-actions" style={{ marginTop: 12 }}>
-                                                <button className="button" onClick={() => applySeedFix(action.fix!.sect, action.fix!.acct, action.fix!.newSign)}>분류DB에 영구 반영: {action.label}</button>
-                                              </div>
-                                            ) : null}
                                           </div>
                                         ))}
                                       </div>
@@ -5014,6 +3197,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
 
           {activeTab === "report" && (
             <>
+              {!accountTreeLookup && <div className="notice">분류DB(계정트리) 로딩 중… 묶음·분류 기반 결과물은 트리 로드 후 표시됩니다.</div>}
               {!resultReporting?.periods.length && <div className="notice">결과물에 보여줄 저장 데이터가 없습니다. 먼저 OCR검증에서 `저장하기`를 누른 뒤 데이터 탭에서 항목을 선택해 주세요.</div>}
 
               {!!resultReporting?.periods.length && (
@@ -5254,43 +3438,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
             </>
           )}
 
-          {activeTab === "classify" && (
-            <>
-              <section className="overview-card report-hero-card">
-                <div className="section-title">
-                  <div>
-                    <span className="section-kicker">분류 기준</span>
-                    <h3>5단계 분류 트리 (대 → 중 → 소 → 세 → 항목)</h3>
-                    <p className="result-meta">시드 카탈로그(632 세분류) 기준 트리. 노드를 펼쳐 하위 항목을 확인하고, 실제 OCR 등장 항목은 강조됩니다. 미분류 그룹은 맨 밑에 모입니다.</p>
-                    {classificationSaveState === "saved" && (
-                      <p className="save-feedback success">분류를 저장했고, 저장된 결과물도 현재 분류 기준으로 다시 계산했습니다.</p>
-                    )}
-                  </div>
-                  <div className="inline-actions">
-                    <button className="ghost-button" disabled={!classificationHistory.length} onClick={undoClassificationEdit}>되돌리기</button>
-                    <button className={`button ${classificationSaveState === "saved" ? "is-saved" : ""}`.trim()} onClick={() => applyClassificationCatalog(classificationCatalog, true)}>
-                      {classificationSaveState === "saved" ? "분류 저장됨" : "분류 저장"}
-                    </button>
-                  </div>
-                </div>
-              </section>
-
-              <section className="config-card">
-                <ClassificationTableView
-                  accountEntries={accountDictionaryEntries}
-                  catalog={classificationCatalog}
-                  onOverridesChange={handleClassificationOverrides}
-                  sheetsSync={{
-                    onClick: syncClassificationDbOnly,
-                    onResetClick: syncClassificationDbResetOnly,
-                    status: sheetsSyncState.status,
-                    message: sheetsSyncState.message
-                  }}
-                />
-              </section>
-            </>
-          )}
-
           {activeTab === "formulas" && (
             <>
               <section className="overview-card report-hero-card">
@@ -5399,24 +3546,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
               <section className="config-card">
                 <AccountTreeMirror sourcesByCode={treeSourceData.sourcesByCode} unclassified={treeSourceData.unclassified} pendingRows={treeSourceData.pendingRows} onOpenSource={openSourceInValidator} />
               </section>
-            </>
-          )}
-
-          {activeTab === "result-db" && (
-            <>
-              <section className="overview-card report-hero-card">
-                <div className="section-title">
-                  <div>
-                    <span className="section-kicker">4-1. 결과물DB</span>
-                    <h3>결과물 화면용 분류 트리 + 묶음</h3>
-                    <p className="muted" style={{ marginTop: 4 }}>
-                      보고서·매트릭스 화면에서 사용하는 분류 트리(영업비용/변동비/고정비 등)와 묶음(인건비, 차입금 등 27개) 정의입니다.
-                      OCR 매칭·부호 결정은 4. 분류DB(시드)에서 합니다. 두 DB는 코드(넘버)로 연결됩니다.
-                    </p>
-                  </div>
-                </div>
-              </section>
-              <ResultClassificationTableView />
             </>
           )}
 

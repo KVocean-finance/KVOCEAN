@@ -1,4 +1,4 @@
-import { COMPANY_LABELS, DEFAULT_CLASSIFICATION_CATALOG, DEFAULT_CLASSIFICATION_GROUPS, DEFAULT_COMPANY_CONFIGS, DEFAULT_LOGIC_CONFIG, LAST_PATCH, LOSS_ACCOUNTS, RESULT_ORDER, SUMMARY_RULES, buildCatalogAliasLookup, classificationCatalogToGroups, classificationGroupsToCatalog, findEntryByAlias, mergeDefaultClassificationCatalog, sanitizeClassificationGroups, type CatalogAliasMatch, type ClassificationCatalogGroup, type ClassificationGroups, type CompanyConfigs, type LogicConfig, type SignCode } from "./defaults";
+import { COMPANY_LABELS, DEFAULT_COMPANY_CONFIGS, DEFAULT_LOGIC_CONFIG, LAST_PATCH, LOSS_ACCOUNTS, RESULT_ORDER, SUMMARY_RULES, type CatalogAliasMatch, type CompanyConfigs, type LogicConfig, type SignCode } from "./defaults";
 
 export type ParsedPaste = {
   catRow: string[];
@@ -95,8 +95,6 @@ export function resolveEditedNameRow(
 export type PersistedState = {
   logicConfig: LogicConfig;
   companyConfigs: CompanyConfigs;
-  classificationCatalog: ClassificationCatalogGroup[];
-  classificationGroups: ClassificationGroups;
 };
 
 export const STORAGE_KEYS = {
@@ -108,49 +106,8 @@ export const STORAGE_KEYS = {
 export function getDefaultPersistedState(): PersistedState {
   return {
     logicConfig: structuredClone(DEFAULT_LOGIC_CONFIG),
-    companyConfigs: structuredClone(DEFAULT_COMPANY_CONFIGS),
-    classificationCatalog: structuredClone(DEFAULT_CLASSIFICATION_CATALOG),
-    classificationGroups: structuredClone(DEFAULT_CLASSIFICATION_GROUPS)
+    companyConfigs: structuredClone(DEFAULT_COMPANY_CONFIGS)
   };
-}
-
-function isClassificationCatalogGroup(value: unknown): value is ClassificationCatalogGroup {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const item = value as Partial<ClassificationCatalogGroup>;
-  return typeof item.groupId === "string"
-    && typeof item.majorCategory === "string"
-    && typeof item.middleCategory === "string"
-    && typeof item.smallCategory === "string"
-    && typeof item.sign === "string"
-    && typeof item.canonicalKey === "string"
-    && Array.isArray(item.aliases);
-}
-
-function normalizeClassificationGroups(groups: ClassificationGroups): ClassificationGroups {
-  const next = structuredClone(groups);
-  const netIncomeAliases = ["당기순이익", "당기순손실", "당기순이익(손실)", "당기순손익"];
-
-  if (next.계속사업당기순이익) {
-    next.계속사업당기순이익 = Array.from(new Set([...next.계속사업당기순이익, ...netIncomeAliases]));
-  } else {
-    next.계속사업당기순이익 = netIncomeAliases;
-  }
-
-  return next;
-}
-
-function mergeClassificationGroups(defaults: ClassificationGroups, persisted: ClassificationGroups): ClassificationGroups {
-  const merged: ClassificationGroups = structuredClone(defaults);
-
-  for (const [key, aliases] of Object.entries(persisted)) {
-    const defaultAliases = merged[key] ?? [];
-    merged[key] = Array.from(new Set([...(defaultAliases ?? []), ...(aliases ?? [])]));
-  }
-
-  return normalizeClassificationGroups(merged);
 }
 
 function mergeLogicConfig(defaults: LogicConfig, persisted?: Partial<LogicConfig>): LogicConfig {
@@ -192,21 +149,9 @@ export function parsePersistedState(raw: string | null): PersistedState {
 
   try {
     const parsed = JSON.parse(raw) as Partial<PersistedState>;
-    const parsedCatalog = Array.isArray(parsed.classificationCatalog)
-      ? parsed.classificationCatalog.filter(isClassificationCatalogGroup)
-      : [];
-    const legacyGroups = sanitizeClassificationGroups(mergeClassificationGroups(fallback.classificationGroups, parsed.classificationGroups ?? {}));
-    const classificationCatalog = parsedCatalog.length
-      ? mergeDefaultClassificationCatalog(parsedCatalog)
-      : classificationGroupsToCatalog(legacyGroups);
-    const classificationGroups = parsedCatalog.length
-      ? classificationCatalogToGroups(classificationCatalog)
-      : legacyGroups;
     return {
       logicConfig: mergeLogicConfig(fallback.logicConfig, parsed.logicConfig),
-      companyConfigs: { ...fallback.companyConfigs, ...(parsed.companyConfigs ?? {}) },
-      classificationCatalog,
-      classificationGroups
+      companyConfigs: { ...fallback.companyConfigs, ...(parsed.companyConfigs ?? {}) }
     };
   } catch {
     return fallback;
@@ -361,14 +306,10 @@ export function resolveAccountClassification(
   sectionName?: string,
   catalogLookup?: Map<string, CatalogAliasMatch[]>,
   treeOnly = false
-): { sign: SignCode; code: number | null } | null {
-  // treeOnly = 새 계정트리 단일 소스 모드 — 옛 시드/접미사 규칙을 건너뛰고
-  // catalogLookup(=트리 어댑터)만 본다. 기본 false면 기존 동작 그대로(안전).
-  if (!treeOnly) {
-    const seedEntry = findEntryByAlias(name, sectionName);
-    if (seedEntry) return { sign: seedEntry.sign as SignCode, code: seedEntry.code };
-  }
-
+): { sign: SignCode; code: number | null; canonical?: string } | null {
+  // 계정트리(catalogLookup)가 유일한 분류 소스다. 옛 시드/접미사 규칙은
+  // 제거됐다. treeOnly 파라미터는 호출부 시그니처 호환을 위해 남겨두지만
+  // 분류는 항상 catalogLookup에서만 나온다.
   if (catalogLookup) {
     let candidates = catalogLookup.get(normalizeLookupKeyLocal(name));
     if (candidates && candidates.length > 0) {
@@ -394,12 +335,10 @@ export function resolveAccountClassification(
       }
       // groupId는 catalog 그룹 식별자 — 시드 기반 그룹이면 7자리 code 문자열.
       const parsedCode = Number(pick.groupId);
-      return { sign: pick.sign, code: Number.isFinite(parsedCode) && parsedCode > 0 ? parsedCode : null };
+      // canonicalKey = 매칭된 트리 leaf 이름(L5). 보고서 행 병합의 canonical로 쓴다
+      // (트리 모드에선 classificationGroups 별칭 대신 트리 leaf명으로 묶음).
+      return { sign: pick.sign, code: Number.isFinite(parsedCode) && parsedCode > 0 ? parsedCode : null, canonical: pick.canonicalKey };
     }
-  }
-  if (!treeOnly) {
-    if (name.includes("_양수") || name.endsWith("양수")) return { sign: 0, code: null };
-    if (name.includes("_음수") || name.endsWith("음수")) return { sign: 1, code: null };
   }
   return null;
 }
@@ -430,9 +369,9 @@ export function resolveSign(
   sectionName?: string,
   catalogLookup?: Map<string, CatalogAliasMatch[]>,
   treeOnly = false
-): { sign: SignCode; matched: boolean; code: number | null } {
+): { sign: SignCode; matched: boolean; code: number | null; canonical?: string } {
   const result = resolveAccountClassification(name, sectionName, catalogLookup, treeOnly);
-  if (result !== null) return { sign: result.sign, matched: true, code: result.code };
+  if (result !== null) return { sign: result.sign, matched: true, code: result.code, canonical: result.canonical };
   return { sign: 0, matched: false, code: null };
 }
 
@@ -975,16 +914,11 @@ export function runValidation(args: {
   pasteEdits: Record<string, number>;
   nameEdits: Record<string, string>;
   sessionSignFixes: SessionSignFixes;
-  /** Live classification catalog (4. 분류DB). When supplied, user edits there
-   * take priority over the immutable seed for sign decisions. */
-  classificationCatalog?: ClassificationCatalogGroup[];
-  /** 계정트리 어댑터 lookup. 주면 시드/옛카탈로그 무시하고 트리만 본다(treeOnly). */
+  /** 계정트리 어댑터 lookup — 유일한 분류 소스. */
   accountTreeLookup?: Map<string, CatalogAliasMatch[]>;
 }): ValidationRun {
   const treeOnly = !!args.accountTreeLookup;
-  const catalogLookup = args.accountTreeLookup ?? (args.classificationCatalog
-    ? buildCatalogAliasLookup(args.classificationCatalog)
-    : undefined);
+  const catalogLookup = args.accountTreeLookup;
   const parsed = parsePastedText(args.pastedText);
   const detectedCompany = detectCompanyFromPaste(args.pastedText);
   const rawFirst = parsed.dataRows[0] ?? [];

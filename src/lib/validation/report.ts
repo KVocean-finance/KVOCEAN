@@ -1,20 +1,11 @@
-import { buildCatalogAliasLookup, DEFAULT_CLASSIFICATION_GROUPS, LOSS_ACCOUNTS, MANAGED_CLASSIFICATION_KEY_SET, type CatalogAliasMatch, type ClassificationCatalogGroup, type ClassificationGroups, type CompanyConfigs, type LogicConfig, type SignCode } from "./defaults";
+import { LOSS_ACCOUNTS, type CatalogAliasMatch, type CompanyConfigs, type LogicConfig, type SignCode } from "./defaults";
 import { applySign, detectCompanyFromPaste, formatNumber, parsePastedText, pasteEditKey, resolveEditedNameRow, resolveSign, safeFloat, type SessionSignFixes } from "./engine";
-import { buildReportKeywordCodes } from "./result-group-mapping";
 
 // 보고서 키워드(인건비/현금및현금성자산/차입금 …) → 묶음 멤버 code 집합.
 // 행의 code가 이 집합에 들면 곧 그 묶음 멤버 — 이름 대조 없이 즉시 판정한다.
-function buildLegacyKeywordCodeSets(): Record<string, Set<number>> {
-  const out: Record<string, Set<number>> = {};
-  for (const [keyword, codes] of Object.entries(buildReportKeywordCodes())) {
-    out[keyword] = new Set(codes);
-  }
-  return out;
-}
-
-// 기본은 옛 분류(시드/결과물DB) 기반이지만, 계정트리 로드 시 validator-app가
-// setReportKeywordCodeSets로 트리 기반(13자리 코드)으로 교체한다 = 컷오버.
-let REPORT_KEYWORD_CODE_SETS: Record<string, Set<number>> = buildLegacyKeywordCodeSets();
+// 계정트리가 단일 소스 — validator-app가 부팅 시 setReportKeywordCodeSets로
+// 트리 기반(13자리 코드) 묶음셋을 채운다. 로드 전엔 비어 있다(분류 없음).
+let REPORT_KEYWORD_CODE_SETS: Record<string, Set<number>> = {};
 
 export function setReportKeywordCodeSets(sets: Record<string, Set<number>>): void {
   REPORT_KEYWORD_CODE_SETS = sets;
@@ -118,7 +109,6 @@ export type SavedQuarterSnapshot = {
     sessionSignFixes?: SessionSignFixes;
     logicConfig?: LogicConfig;
     companyConfigs?: CompanyConfigs;
-    classificationGroups?: ClassificationGroups;
   };
 };
 
@@ -142,7 +132,6 @@ type MetricContext = {
   detailRawRows: StatementMatrixRow[];
   detailAdjustedRows: StatementMatrixRow[];
   sectionTotals: Map<string, Record<string, number>>;
-  classificationGroups: ClassificationGroups;
 };
 
 type MetricSpec = {
@@ -254,79 +243,21 @@ function stripDerivedSuffix(accountName: string) {
   return null;
 }
 
-// classificationGroups(수백 그룹·수천 별칭)를 매 행마다 선형 스캔하면
-// 보고서 한 번 빌드에 resolveCanonicalAccountKey가 수천 번 불려 메인
-// 스레드를 수 초간 멈춘다. 그룹 객체별로 정규화 인덱스를 1회 만들어
-// 캐시 — 정확 일치는 O(1), 부분 일치(loop 3)도 재정규화 없이 순회.
-type CanonicalKeyIndex = {
-  keyIndex: Map<string, string>;
-  aliasIndex: Map<string, string>;
-  normalizedAliasPairs: Array<{ normalizedAlias: string; canonicalKey: string }>;
-};
-const canonicalKeyIndexCache = new WeakMap<ClassificationGroups, CanonicalKeyIndex>();
-
-function getCanonicalKeyIndex(classificationGroups: ClassificationGroups): CanonicalKeyIndex {
-  const cached = canonicalKeyIndexCache.get(classificationGroups);
-  if (cached) return cached;
-
-  const keyIndex = new Map<string, string>();
-  const aliasIndex = new Map<string, string>();
-  const normalizedAliasPairs: Array<{ normalizedAlias: string; canonicalKey: string }> = [];
-
-  // 원래 동작 보존: canonicalKey 정확일치(키 순서) → 별칭 정확일치(엔트리
-  // 순서, 그룹 내 첫 별칭) → 부분일치. 먼저 등록된 것이 이긴다.
-  for (const [canonicalKey, aliases] of Object.entries(classificationGroups)) {
-    const nk = normalizeText(canonicalKey);
-    if (!keyIndex.has(nk)) keyIndex.set(nk, canonicalKey);
-    for (const alias of aliases) {
-      const na = normalizeText(alias);
-      if (!aliasIndex.has(na)) aliasIndex.set(na, canonicalKey);
-      normalizedAliasPairs.push({ normalizedAlias: na, canonicalKey });
-    }
-  }
-
-  const built = { keyIndex, aliasIndex, normalizedAliasPairs };
-  canonicalKeyIndexCache.set(classificationGroups, built);
-  return built;
+// 계정트리가 단일 소스이므로 별칭맵(classificationGroups)은 없다 — 빈 맵과
+// 동치다. 따라서 base canonical key는 정규화한 계정명 그대로다. _derived
+// suffix(양수/음수/대손충당금 등)는 보존해 별도 묶음으로 분리한다.
+function resolveBaseCanonicalAccountKey(accountName: string) {
+  return normalizeText(accountName);
 }
 
-function resolveBaseCanonicalAccountKey(accountName: string, sectionKey: string, classificationGroups: ClassificationGroups) {
-  const normalizedName = normalizeText(accountName);
-  const { keyIndex, aliasIndex, normalizedAliasPairs } = getCanonicalKeyIndex(classificationGroups);
-
-  const keyHit = keyIndex.get(normalizedName);
-  if (keyHit !== undefined) return keyHit;
-
-  const aliasHit = aliasIndex.get(normalizedName);
-  if (aliasHit !== undefined) return aliasHit;
-
-  for (const { normalizedAlias, canonicalKey } of normalizedAliasPairs) {
-    if (normalizedName.includes(normalizedAlias)) {
-      return canonicalKey;
-    }
-  }
-
-  if (sectionKey === "영업비용" && normalizedName.includes("광고")) {
-    return "광고선전비";
-  }
-  if (sectionKey === "영업비용" && normalizedName.includes("연구")) {
-    return "연구개발비";
-  }
-  if (sectionKey === "영업비용" && normalizedName.includes("인건비")) {
-    return "인건비";
-  }
-
-  return normalizedName;
-}
-
-function resolveCanonicalAccountKey(accountName: string, sectionKey: string, classificationGroups: ClassificationGroups) {
+function resolveCanonicalAccountKey(accountName: string, _sectionKey: string) {
   const derived = stripDerivedSuffix(accountName);
   if (derived?.baseName) {
-    const baseCanonicalKey = resolveBaseCanonicalAccountKey(derived.baseName, sectionKey, classificationGroups);
+    const baseCanonicalKey = resolveBaseCanonicalAccountKey(derived.baseName);
     return `${baseCanonicalKey}_${derived.suffix}`;
   }
 
-  return resolveBaseCanonicalAccountKey(accountName, sectionKey, classificationGroups);
+  return resolveBaseCanonicalAccountKey(accountName);
 }
 
 function buildDerivedMetricCandidates(names: string[]) {
@@ -345,35 +276,20 @@ function buildDerivedMetricCandidates(names: string[]) {
   return Array.from(candidates);
 }
 
-function buildMetricCandidateSet(names: string[], classificationGroups: ClassificationGroups) {
+function buildMetricCandidateSet(names: string[]) {
   const candidates = new Set<string>();
 
+  // 별칭맵(classificationGroups)이 빈 맵이므로 별칭 확장은 없다 —
+  // 파생 후보 이름만 정규화해 모은다.
   buildDerivedMetricCandidates(names).forEach((candidate) => {
     candidates.add(normalizeText(candidate));
-    const aliases = MANAGED_CLASSIFICATION_KEY_SET.has(candidate)
-      ? (classificationGroups[candidate] ?? [])
-      : (classificationGroups[candidate] ?? []);
-    aliases.forEach((alias) => {
-      candidates.add(normalizeText(alias));
-    });
-  });
-
-  names.forEach((name) => {
-    const aliases = MANAGED_CLASSIFICATION_KEY_SET.has(name)
-      ? (classificationGroups[name] ?? [])
-      : (classificationGroups[name] ?? []);
-    aliases.forEach((alias) => {
-      candidates.add(normalizeText(alias));
-      const derived = resolveCanonicalAccountKey(alias, "기타", classificationGroups);
-      candidates.add(normalizeText(derived));
-    });
   });
 
   return candidates;
 }
 
 function getNetMetricRows(context: MetricContext, names: string[]) {
-  const candidateSet = buildMetricCandidateSet(names, context.classificationGroups);
+  const candidateSet = buildMetricCandidateSet(names);
   return context.adjustedRows.filter((row) => {
     const rowKey = normalizeText(row.canonicalKey || row.accountName);
     const rowName = normalizeText(row.accountName);
@@ -470,7 +386,6 @@ function resolveRowMeta(
   nameRow: string[],
   logicConfig: LogicConfig,
   companyConfigs: CompanyConfigs,
-  classificationGroups: ClassificationGroups,
   companyName: string | null,
   sessionSignFixes: SessionSignFixes,
   catalogLookup?: Map<string, CatalogAliasMatch[]>,
@@ -516,11 +431,18 @@ function resolveRowMeta(
       if (l1 === "1" || l1 === "2" || l1 === "3") resolvedCode = null;
     }
 
+    // 트리 모드: 행 병합 canonical을 트리 leaf 이름으로 잡는다(별칭맵 classificationGroups
+    // 불필요). 매칭된 leaf(코드 유지)는 그 leaf명으로, 미분류/계산값(코드 null)은
+    // 계정명 그대로 — 각자 따로 둔다. 레거시 모드는 기존 별칭 canonical 유지.
+    const canonicalKey = treeOnly
+      ? (resolvedCode != null && classification.canonical ? classification.canonical : accountName)
+      : resolveCanonicalAccountKey(accountName, sectionKey);
+
         return {
           accountName,
           section,
           sectionKey,
-          canonicalKey: resolveCanonicalAccountKey(accountName, sectionKey, classificationGroups),
+          canonicalKey,
           signFlag: signCode === 1 ? 1 : 0,
           signCode,
           code: resolvedCode,
@@ -568,8 +490,6 @@ export function normalizePasteEditsForValidation(args: {
   selectedCompany: string | null;
   logicConfig: LogicConfig;
   companyConfigs: CompanyConfigs;
-  classificationGroups: ClassificationGroups;
-  classificationCatalog?: ClassificationCatalogGroup[];
   accountTreeLookup?: Map<string, CatalogAliasMatch[]>;
   pasteEdits: Record<string, number>;
   nameEdits: Record<string, string>;
@@ -584,8 +504,8 @@ export function normalizePasteEditsForValidation(args: {
   const periods = buildPeriods(parsed.nameRow, parsed.dataRows);
   const effectiveNameRow = resolveEditedNameRow(parsed.nameRow, args.nameEdits);
   const treeOnly = !!args.accountTreeLookup;
-  const catalogLookup = args.accountTreeLookup ?? (args.classificationCatalog ? buildCatalogAliasLookup(args.classificationCatalog) : undefined);
-  const metaRows = resolveRowMeta(parsed.catRow, effectiveNameRow, args.logicConfig, args.companyConfigs, args.classificationGroups, companyName, args.sessionSignFixes, catalogLookup, treeOnly);
+  const catalogLookup = args.accountTreeLookup;
+  const metaRows = resolveRowMeta(parsed.catRow, effectiveNameRow, args.logicConfig, args.companyConfigs, companyName, args.sessionSignFixes, catalogLookup, treeOnly);
   const nextPasteEdits = { ...args.pasteEdits };
 
   metaRows.forEach((meta) => {
@@ -628,12 +548,9 @@ function buildSectionRollupNameSet(rows: StatementMatrixRow[]) {
 
 // 합계(getRowValues)와 breakdown(getRowEntries 기반)이 동일한 row 목록을
 // 공유하도록, 행 선별·정렬 로직은 여기 한 곳에 둔다.
-function getRowEntries(rows: StatementMatrixRow[], candidates: string[], sectionName: string | undefined, classificationGroups: ClassificationGroups) {
-  const canonicalCandidates = candidates.flatMap((candidate) => {
-    const base = [candidate];
-    const aliases = classificationGroups[candidate] ?? [];
-    return [...base, ...aliases].map(normalizeText);
-  });
+function getRowEntries(rows: StatementMatrixRow[], candidates: string[], sectionName: string | undefined) {
+  // 별칭맵이 빈 맵이므로 별칭 확장은 없다 — 후보 이름만 정규화한다.
+  const canonicalCandidates = candidates.map(normalizeText);
   const canonicalSection = sectionName ? normalizeSectionKey(sectionName) : null;
   const preferredSections = sectionName ? [canonicalSection!].filter(Boolean) : getPreferredSectionKeys(candidates);
   // 묶음 키워드면 code 집합. 행의 code가 여기 들면 이름 대조 없이 매칭.
@@ -680,8 +597,8 @@ function rowEntriesToBreakdown(entries: StatementMatrixRow[], periodKey: string)
     .filter((item): item is MetricCalculationInput => item !== null);
 }
 
-function getRowValues(rows: StatementMatrixRow[], periodKey: string, candidates: string[], sectionName: string | undefined, classificationGroups: ClassificationGroups) {
-  return getRowEntries(rows, candidates, sectionName, classificationGroups)
+function getRowValues(rows: StatementMatrixRow[], periodKey: string, candidates: string[], sectionName: string | undefined) {
+  return getRowEntries(rows, candidates, sectionName)
     .map((row) => row.values[periodKey])
     .filter((value): value is number => value !== null && value !== undefined);
 }
@@ -773,8 +690,8 @@ function getSectionTotals(rows: StatementMatrixRow[], periods: ReportPeriod[]) {
   return totals;
 }
 
-function firstAvailableValue(rows: StatementMatrixRow[], periodKey: string, candidates: string[], sectionName: string | undefined, classificationGroups: ClassificationGroups) {
-  const values = getRowValues(rows, periodKey, candidates, sectionName, classificationGroups);
+function firstAvailableValue(rows: StatementMatrixRow[], periodKey: string, candidates: string[], sectionName: string | undefined) {
+  const values = getRowValues(rows, periodKey, candidates, sectionName);
   return values[0] ?? null;
 }
 
@@ -792,33 +709,22 @@ function firstExactAccountValue(rows: StatementMatrixRow[], periodKey: string, a
   return match?.values[periodKey] ?? null;
 }
 
-function sumValues(rows: StatementMatrixRow[], periodKey: string, candidates: string[], sectionName: string | undefined, classificationGroups: ClassificationGroups) {
-  const values = getRowValues(rows, periodKey, candidates, sectionName, classificationGroups);
+function sumValues(rows: StatementMatrixRow[], periodKey: string, candidates: string[], sectionName: string | undefined) {
+  const values = getRowValues(rows, periodKey, candidates, sectionName);
   if (!values.length) {
     return null;
   }
   return values.reduce((total, value) => total + value, 0);
 }
 
-function buildClassifiedCandidateSet(candidates: string[], classificationGroups: ClassificationGroups, sectionName?: string) {
-  const sectionKey = normalizeSectionKey(sectionName ?? "기타");
-  const values = new Set<string>();
-
-  candidates
-    .filter((candidate) => Boolean(classificationGroups[candidate]))
-    .forEach((candidate) => {
-      values.add(normalizeText(candidate));
-      for (const alias of classificationGroups[candidate] ?? []) {
-        values.add(normalizeText(alias));
-        values.add(normalizeText(resolveCanonicalAccountKey(alias, sectionKey, classificationGroups)));
-      }
-    });
-
-  return values;
+function buildClassifiedCandidateSet(_candidates: string[], _sectionName?: string) {
+  // 별칭맵이 빈 맵이므로 어떤 후보도 classificationGroups에 없다 →
+  // 이전 동작과 동치인 빈 집합을 반환한다(이름 매칭은 codeSet/직접 비교로만).
+  return new Set<string>();
 }
 
-function sumClassifiedValues(rows: StatementMatrixRow[], periodKey: string, candidates: string[], sectionName: string | undefined, classificationGroups: ClassificationGroups) {
-  const canonicalCandidates = buildClassifiedCandidateSet(candidates, classificationGroups, sectionName);
+function sumClassifiedValues(rows: StatementMatrixRow[], periodKey: string, candidates: string[], sectionName: string | undefined) {
+  const canonicalCandidates = buildClassifiedCandidateSet(candidates, sectionName);
   const canonicalSection = sectionName ? normalizeSectionKey(sectionName) : null;
   const preferredSections = sectionName ? [canonicalSection!].filter(Boolean) : getPreferredSectionKeys(candidates);
   const codeSet = collectKeywordCodeSet(candidates);
@@ -850,8 +756,8 @@ function sumClassifiedValues(rows: StatementMatrixRow[], periodKey: string, cand
   return values.reduce((total, value) => total + value, 0);
 }
 
-function getClassifiedRows(rows: StatementMatrixRow[], candidates: string[], sectionName: string | undefined, classificationGroups: ClassificationGroups) {
-  const canonicalCandidates = buildClassifiedCandidateSet(candidates, classificationGroups, sectionName);
+function getClassifiedRows(rows: StatementMatrixRow[], candidates: string[], sectionName: string | undefined) {
+  const canonicalCandidates = buildClassifiedCandidateSet(candidates, sectionName);
   const canonicalSection = sectionName ? normalizeSectionKey(sectionName) : null;
 
   const codeSet = collectKeywordCodeSet(candidates);
@@ -871,7 +777,7 @@ function getClassifiedRows(rows: StatementMatrixRow[], candidates: string[], sec
 
 function getClassifiedMetricBreakdown(context: MetricContext, periodKey: string, names: string[], sectionName?: string) {
   return expandToDetailRows(
-    getClassifiedRows(context.adjustedRows, names, sectionName, context.classificationGroups),
+    getClassifiedRows(context.adjustedRows, names, sectionName),
     context.detailAdjustedRows
   )
     .map<MetricCalculationInput | null>((row) => {
@@ -932,7 +838,7 @@ function expandToDetailRows(merged: StatementMatrixRow[], detailRows: StatementM
 function getRawMetricBreakdown(context: MetricContext, periodKey: string, names: string[], sectionName?: string) {
   return rowEntriesToBreakdown(
     expandToDetailRows(
-      getRowEntries(context.rawRows, names, sectionName, context.classificationGroups),
+      getRowEntries(context.rawRows, names, sectionName),
       context.detailRawRows
     ),
     periodKey
@@ -942,7 +848,7 @@ function getRawMetricBreakdown(context: MetricContext, periodKey: string, names:
 function getAdjustedMetricBreakdown(context: MetricContext, periodKey: string, names: string[], sectionName?: string) {
   return rowEntriesToBreakdown(
     expandToDetailRows(
-      getRowEntries(context.adjustedRows, names, sectionName, context.classificationGroups),
+      getRowEntries(context.adjustedRows, names, sectionName),
       context.detailAdjustedRows
     ),
     periodKey
@@ -950,27 +856,27 @@ function getAdjustedMetricBreakdown(context: MetricContext, periodKey: string, n
 }
 
 function getMetricValue(context: MetricContext, periodKey: string, names: string[]) {
-  return firstAvailableValue(context.adjustedRows, periodKey, names, undefined, context.classificationGroups);
+  return firstAvailableValue(context.adjustedRows, periodKey, names, undefined);
 }
 
 function getMetricSum(context: MetricContext, periodKey: string, names: string[]) {
-  return sumValues(context.adjustedRows, periodKey, names, undefined, context.classificationGroups);
+  return sumValues(context.adjustedRows, periodKey, names, undefined);
 }
 
 function getClassifiedMetricSum(context: MetricContext, periodKey: string, names: string[], sectionName?: string) {
-  return sumClassifiedValues(context.adjustedRows, periodKey, names, sectionName, context.classificationGroups);
+  return sumClassifiedValues(context.adjustedRows, periodKey, names, sectionName);
 }
 
 function getRawMetricValue(context: MetricContext, periodKey: string, names: string[], sectionName?: string) {
-  return firstAvailableValue(context.rawRows, periodKey, names, sectionName, context.classificationGroups);
+  return firstAvailableValue(context.rawRows, periodKey, names, sectionName);
 }
 
 function getRawMetricSum(context: MetricContext, periodKey: string, names: string[], sectionName?: string) {
-  return sumValues(context.rawRows, periodKey, names, sectionName, context.classificationGroups);
+  return sumValues(context.rawRows, periodKey, names, sectionName);
 }
 
 function getAdjustedMetricValue(context: MetricContext, periodKey: string, names: string[], sectionName?: string) {
-  return firstAvailableValue(context.adjustedRows, periodKey, names, sectionName, context.classificationGroups);
+  return firstAvailableValue(context.adjustedRows, periodKey, names, sectionName);
 }
 
 function getAdjustedExactAccountValue(context: MetricContext, periodKey: string, accountNames: string[], sectionName?: string) {
@@ -987,7 +893,7 @@ function getAdjustedExactMetricValue(context: MetricContext, periodKey: string, 
 }
 
 function getAdjustedMetricSum(context: MetricContext, periodKey: string, names: string[], sectionName?: string) {
-  return sumValues(context.adjustedRows, periodKey, names, sectionName, context.classificationGroups);
+  return sumValues(context.adjustedRows, periodKey, names, sectionName);
 }
 
 function getPreferredAdjustedMetric(context: MetricContext, periodKey: string, names: string[], sectionName?: string) {
@@ -1961,8 +1867,6 @@ export function buildReportingModel(args: {
   tolerance?: number;
   logicConfig: LogicConfig;
   companyConfigs: CompanyConfigs;
-  classificationGroups: ClassificationGroups;
-  classificationCatalog?: ClassificationCatalogGroup[];
   accountTreeLookup?: Map<string, CatalogAliasMatch[]>;
   pasteEdits: Record<string, number>;
   nameEdits: Record<string, string>;
@@ -1986,8 +1890,8 @@ export function buildReportingModel(args: {
   const periods = buildPeriods(parsed.nameRow, parsed.dataRows);
   const effectiveNameRow = resolveEditedNameRow(parsed.nameRow, args.nameEdits);
   const treeOnly = !!args.accountTreeLookup;
-  const catalogLookup = args.accountTreeLookup ?? (args.classificationCatalog ? buildCatalogAliasLookup(args.classificationCatalog) : undefined);
-  const metaRows = resolveRowMeta(parsed.catRow, effectiveNameRow, args.logicConfig, args.companyConfigs, args.classificationGroups, companyName, args.sessionSignFixes, catalogLookup, treeOnly);
+  const catalogLookup = args.accountTreeLookup;
+  const metaRows = resolveRowMeta(parsed.catRow, effectiveNameRow, args.logicConfig, args.companyConfigs, companyName, args.sessionSignFixes, catalogLookup, treeOnly);
   const normalizedPasteEdits = normalizePasteEditsForValidation(args);
   const rawStatementRows = buildStatementRows(metaRows, periods, parsed.dataRows, normalizedPasteEdits, false);
   const adjustedStatementRows = buildStatementRows(metaRows, periods, parsed.dataRows, normalizedPasteEdits, true);
@@ -1997,8 +1901,7 @@ export function buildReportingModel(args: {
       adjustedRows: adjustedStatementRows,
       detailRawRows: rawStatementRows,
       detailAdjustedRows: adjustedStatementRows,
-      sectionTotals: getSectionTotals(adjustedStatementRows, periods),
-      classificationGroups: args.classificationGroups
+      sectionTotals: getSectionTotals(adjustedStatementRows, periods)
     };
 
   return {
@@ -2018,8 +1921,6 @@ export function buildQuarterSnapshots(args: {
   tolerance: number;
   logicConfig: LogicConfig;
   companyConfigs: CompanyConfigs;
-  classificationGroups: ClassificationGroups;
-  classificationCatalog?: ClassificationCatalogGroup[];
   accountTreeLookup?: Map<string, CatalogAliasMatch[]>;
   pasteEdits: Record<string, number>;
   nameEdits: Record<string, string>;
@@ -2091,7 +1992,6 @@ export function rebuildSnapshotsWithTree(
   ctx: {
     logicConfig: LogicConfig;
     companyConfigs: CompanyConfigs;
-    classificationGroups: ClassificationGroups;
     accountTreeLookup: Map<string, CatalogAliasMatch[]>;
   }
 ): SavedQuarterSnapshot[] {
@@ -2114,7 +2014,6 @@ export function rebuildSnapshotsWithTree(
         tolerance: group[0].source.tolerance ?? 0,
         logicConfig: ctx.logicConfig,
         companyConfigs: ctx.companyConfigs,
-        classificationGroups: ctx.classificationGroups,
         accountTreeLookup: ctx.accountTreeLookup,
         pasteEdits: group[0].source.pasteEdits ?? {},
         nameEdits: group[0].source.nameEdits ?? {},
@@ -2132,7 +2031,7 @@ export function rebuildSnapshotsWithTree(
   return out;
 }
 
-export function buildCompanyReport(snapshots: SavedQuarterSnapshot[], activeClassificationGroups?: ClassificationGroups) {
+export function buildCompanyReport(snapshots: SavedQuarterSnapshot[]) {
   if (!snapshots.length) {
     return {
       detectedCompany: null,
@@ -2161,17 +2060,20 @@ export function buildCompanyReport(snapshots: SavedQuarterSnapshot[], activeClas
       return a.label.localeCompare(b.label);
     });
 
-  const reportClassificationGroups = activeClassificationGroups
-    ?? snapshots[0]?.source?.classificationGroups
-    ?? structuredClone(DEFAULT_CLASSIFICATION_GROUPS);
-
+  // 계정트리가 단일 소스 — 별칭맵 불필요. 병합 canonical은 저장된 트리
+  // leaf명(코드 보유 행), 묶음은 codeSet으로 처리한다. 코드 없는 행은
+  // 계정명 정규화로 canonical을 잡는다(별칭 확장 없음 = 빈 맵 동치).
   const buildMatrix = (kind: "rawStatementRows" | "adjustedStatementRows") => {
     const rowMap = new Map<string, StatementMatrixRow>();
     snapshots.forEach((snapshot) => {
       const bucketMap = new Map<string, Array<typeof snapshot[typeof kind][number] & { activeCanonicalKey: string }>>();
 
       snapshot[kind].forEach((row) => {
-        const canonicalKey = resolveCanonicalAccountKey(row.accountName, row.sectionKey, reportClassificationGroups);
+        // 트리 모드 행(코드 보유)은 저장된 트리 leaf canonical을 그대로 쓴다.
+        // 레거시 행만 별칭맵으로 재유도.
+        const canonicalKey = row.code != null && row.canonicalKey
+          ? row.canonicalKey
+          : resolveCanonicalAccountKey(row.accountName, row.sectionKey);
         const bucketKey = `${normalizeText(row.sectionKey)}__${normalizeText(canonicalKey)}`;
         const bucket = bucketMap.get(bucketKey) ?? [];
         bucket.push({ ...row, activeCanonicalKey: canonicalKey });
@@ -2210,7 +2112,9 @@ export function buildCompanyReport(snapshots: SavedQuarterSnapshot[], activeClas
 
     snapshots.forEach((snapshot) => {
       snapshot[kind].forEach((row) => {
-        const canonicalKey = resolveCanonicalAccountKey(row.accountName, row.sectionKey, reportClassificationGroups);
+        const canonicalKey = row.code != null && row.canonicalKey
+          ? row.canonicalKey
+          : resolveCanonicalAccountKey(row.accountName, row.sectionKey);
         const key = buildRowIdentityKey(row.sectionKey, canonicalKey, row.accountName);
 
         if (!rowMap.has(key)) {
@@ -2243,8 +2147,7 @@ export function buildCompanyReport(snapshots: SavedQuarterSnapshot[], activeClas
     adjustedRows: adjustedStatementRows,
     detailRawRows: detailRawStatementRows,
     detailAdjustedRows: detailAdjustedStatementRows,
-    sectionTotals: getSectionTotals(adjustedStatementRows, periods),
-    classificationGroups: reportClassificationGroups
+    sectionTotals: getSectionTotals(adjustedStatementRows, periods)
   };
 
   return {

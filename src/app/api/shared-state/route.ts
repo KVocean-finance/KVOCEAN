@@ -22,7 +22,7 @@ export async function GET() {
 
   const { data: configRow, error: configError } = await supabase
     .from("app_config")
-    .select("logic_config, company_configs, classification_catalog")
+    .select("logic_config, company_configs")
     .eq("id", "global")
     .maybeSingle();
 
@@ -79,9 +79,7 @@ export async function PUT(request: Request) {
 
   const hasConfigUpdate = !!body.config
     && (body.config.logicConfig !== undefined
-      || body.config.companyConfigs !== undefined
-      || body.config.classificationCatalog !== undefined
-      || body.config.classificationGroups !== undefined);
+      || body.config.companyConfigs !== undefined);
 
   const hasMemoUpdate = !!body.memo && typeof body.memo.value === "string";
 
@@ -112,9 +110,7 @@ export async function PUT(request: Request) {
       action: "config_updated",
       target_type: "app_config",
       target_id: "global",
-      payload: {
-        classificationCatalogCount: serializedConfig.classification_catalog.length
-      },
+      payload: {},
       created_by: user.email
     });
   }

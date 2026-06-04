@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { getAllowedUser } from "@/lib/supabase/access";
-import { DEFAULT_CLASSIFICATION_GROUPS, DEFAULT_COMPANY_CONFIGS, DEFAULT_LOGIC_CONFIG } from "@/lib/validation/defaults";
+import { DEFAULT_COMPANY_CONFIGS, DEFAULT_LOGIC_CONFIG } from "@/lib/validation/defaults";
 import { normalizeSavedQuarterSnapshot, type SavedQuarterSnapshot } from "@/lib/validation/report";
 
 export const runtime = "nodejs";
@@ -37,8 +37,7 @@ function mapDatasetRow(item: DatasetRow) {
     nameEdits: {},
     sessionSignFixes: {},
     logicConfig: structuredClone(DEFAULT_LOGIC_CONFIG),
-    companyConfigs: structuredClone(DEFAULT_COMPANY_CONFIGS),
-    classificationGroups: structuredClone(DEFAULT_CLASSIFICATION_GROUPS)
+    companyConfigs: structuredClone(DEFAULT_COMPANY_CONFIGS)
   };
   return {
     id: item.id,
