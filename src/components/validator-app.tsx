@@ -24,7 +24,7 @@ import {
 } from "@/lib/validation/engine";
 import { type SharedStateResponse } from "@/lib/shared-state";
 import { AccountTreeMirror } from "@/components/account-tree-mirror";
-import { buildTreeCatalogLookupFromRows, buildTreeKeywordCodeSets } from "@/lib/validation/account-tree-adapter";
+import { buildTreeCatalogLookupFromRows, buildTreeKeywordCodeSets, buildTreeKeywordPrefixes } from "@/lib/validation/account-tree-adapter";
 import { parseAccountTree, normalizeAccountName, type AccountTreeRow } from "@/lib/validation/account-tree";
 import {
   buildHeaderRow as buildSheetsHeaderRow,
@@ -926,6 +926,10 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   const [accountTreeNodeNames, setAccountTreeNodeNames] = useState<Set<string>>(() => new Set());
   // 섹션/구조노드 이름 → {대분류,중분류} — 미분류를 어느 가지에 넣을지(③) 매핑용.
   const [structToBranch, setStructToBranch] = useState<Map<string, { l1: string; l2: string }>>(() => new Map());
+  // 13자리 코드 → 트리 경로(대분류>중분류>…>계정). 계산 근거에서 "이 값이 트리 어디서 왔는지" 표시.
+  const [codeToPath, setCodeToPath] = useState<Map<number, string>>(() => new Map());
+  // 묶음 키워드(현금및현금성자산·인건비 …) → 코드 범위(노드 prefix). 묶음 줄에 "1001001001000~" 식 범위 표시.
+  const [keywordPrefixes, setKeywordPrefixes] = useState<Record<string, string[]>>({});
   useEffect(() => {
     let cancelled = false;
     fetch("/api/classification-tree")
@@ -935,9 +939,16 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
         setAccountTreeLookup(buildTreeCatalogLookupFromRows(data.rows as AccountTreeRow[]));
         const names = new Set<string>();
         const branchMap = new Map<string, { l1: string; l2: string }>();
+        const pathMap = new Map<number, string>();
         for (const r of (data.rows as AccountTreeRow[])) {
           for (const label of [r.l1, r.l2, r.l3, r.l4, r.l5]) {
             if (label) names.add(normalizeAccountName(label));
+          }
+          if (r.code) {
+            const codeNum = Number(r.code);
+            if (Number.isFinite(codeNum) && !pathMap.has(codeNum)) {
+              pathMap.set(codeNum, [r.l1, r.l2, r.l3, r.l4, r.l5].filter(Boolean).join(" > "));
+            }
           }
           if (!r.l5 && r.code) {
             // 구조노드 — 가장 깊은 라벨로 가지 매핑
@@ -955,12 +966,14 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
         }
         setAccountTreeNodeNames(names);
         setStructToBranch(branchMap);
+        setCodeToPath(pathMap);
         // 묶음(변동비/인건비/차입금 …) 코드셋도 트리(13자리)로 교체 = 컷오버.
         // 이게 없으면 스냅샷은 트리코드인데 묶음셋은 레거시(7자리)라 묶음 합산이 0.
         if (Array.isArray(data.values) && data.values.length) {
           try {
             const tree = parseAccountTree(data.values as string[][]);
             setReportKeywordCodeSets(buildTreeKeywordCodeSets(tree));
+            setKeywordPrefixes(buildTreeKeywordPrefixes(tree));
           } catch {
             /* 파싱 실패 시 레거시 묶음셋 유지 */
           }
@@ -2470,6 +2483,39 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     return [];
   }
 
+  // 계산 근거에서 계정명 옆에 트리 코드를 표시하는 작은 회색 mono 뱃지.
+  function codeBadge(text: string, title: string) {
+    return (
+      <span
+        className="metric-detail-treecode"
+        title={title}
+        style={{ marginLeft: 6, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11, fontWeight: 400, color: "#94a3b8" }}
+      >
+        {text}
+      </span>
+    );
+  }
+
+  // leaf 계정: 정확한 13자리 코드 (호버 시 트리 경로).
+  function renderTreeCode(code?: number | null) {
+    if (code == null) return null;
+    const path = codeToPath.get(code);
+    return codeBadge(String(code), path ? `트리 경로: ${path}` : `코드 ${code}`);
+  }
+
+  // 계산 근거 입력 줄: leaf면 정확 코드, 묶음이면 코드 범위(노드 prefix, 예: 1001001001000~).
+  function renderInputCode(input: MetricCalculationInput) {
+    if (input.code != null) return renderTreeCode(input.code);
+    const prefixes = keywordPrefixes[input.label];
+    if (prefixes && prefixes.length) {
+      // 원시 prefix → 시작(0채움) ~ 끝(9채움) 범위.
+      const ranges = prefixes.map((p) => `${p.padEnd(13, "0")} ~ ${p.padEnd(13, "9")}`);
+      const shown = ranges.slice(0, 2).join("  /  ") + (ranges.length > 2 ? ` 외 ${ranges.length - 2}` : "");
+      return codeBadge(shown, `코드 범위(이 묶음 아래 전체): ${ranges.join(", ")}`);
+    }
+    return null;
+  }
+
   function renderMetricCalculationCard(
     label: string,
     kind: "amount" | "ratio" | "growthRate",
@@ -2502,14 +2548,14 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
               return (
                 <div className="metric-detail-input-wrap" key={`${kind}-${input.label}`}>
                   <div className="metric-detail-input">
-                    <span>{ioLabel ? `${ioLabel} · ${input.label}` : input.label}</span>
+                    <span>{ioLabel ? `${ioLabel} · ${input.label}` : input.label}{renderInputCode(input)}</span>
                     <strong>{formatCalculationInputValue(input.value)}</strong>
                   </div>
                   {!!breakdown.length && (
                     <div className="metric-detail-subinputs">
                       {breakdown.map((item) => (
                         <div className="metric-detail-subinput" key={`${kind}-${input.label}-${item.label}`}>
-                          <span>{item.label}</span>
+                          <span>{item.label}{renderTreeCode(item.code)}</span>
                           <strong>{formatCalculationInputValue(item.value)}</strong>
                         </div>
                       ))}

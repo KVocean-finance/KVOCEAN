@@ -104,6 +104,27 @@ function nodePrefixes(tree: ParsedAccountTree, nodeName: string): string[] {
   return out;
 }
 
+/**
+ * 보고서 묶음 키워드 → 그 묶음이 모으는 코드 **범위(노드 prefix)**.
+ * 예: 현금및현금성자산 → ["1001001001000"] (그 노드 아래 1001001001xxx 전부).
+ * node 기반 묶음만 깔끔한 범위가 나온다. varFix(변동비/고정비)·leafContains(흩어진 코드)는
+ * 단일 범위가 없어 빈 배열 — 계산 근거에서 범위 대신 개별 코드만 보여준다.
+ * 반환값은 원시 prefix(가변 길이). 표시 측에서 0으로 채우면 시작 코드, 9로 채우면 끝 코드.
+ * 예: "1001001001" → 시작 1001001001000 ~ 끝 1001001001999.
+ */
+export function buildTreeKeywordPrefixes(tree: ParsedAccountTree): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const [keyword, rule] of Object.entries(KEYWORD_RULES)) {
+    const raw = new Set<string>();
+    for (const node of rule.nodes ?? []) {
+      for (const p of nodePrefixes(tree, node)) raw.add(p);
+    }
+    // 더 넓은 범위가 좁은 범위를 포함하면 좁은 쪽 제거 (예: 2001004 ⊃ 2001004001).
+    out[keyword] = Array.from(raw).filter((p) => !Array.from(raw).some((other) => other !== p && p.startsWith(other)));
+  }
+  return out;
+}
+
 /** 보고서 묶음 키워드 → 새 트리 코드(숫자) 집합. report.ts REPORT_KEYWORD_CODE_SETS 대체. */
 export function buildTreeKeywordCodeSets(tree: ParsedAccountTree): Record<string, Set<number>> {
   const out: Record<string, Set<number>> = {};

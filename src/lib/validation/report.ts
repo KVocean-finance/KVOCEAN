@@ -57,6 +57,9 @@ export type FinalMetricRow = {
 export type MetricCalculationInput = {
   label: string;
   value: number | null;
+  // 계정트리 13자리 코드 — 계산 근거에서 "이 값이 어느 코드에서 왔는지" 표시용.
+  // 묶음 합계 등 단일 계정이 아닌 입력은 없을 수 있어 optional.
+  code?: number | null;
   components?: MetricCalculationInput[];
 };
 
@@ -592,7 +595,7 @@ function rowEntriesToBreakdown(entries: StatementMatrixRow[], periodKey: string)
       const label = row.accountName === row.canonicalKey
         ? row.accountName
         : `${row.canonicalKey} ← ${row.accountName}`;
-      return { label, value } satisfies MetricCalculationInput;
+      return { label, value, code: row.code ?? null } satisfies MetricCalculationInput;
     })
     .filter((item): item is MetricCalculationInput => item !== null);
 }
@@ -790,7 +793,7 @@ function getClassifiedMetricBreakdown(context: MetricContext, periodKey: string,
         ? row.accountName
         : `${row.canonicalKey} ← ${row.accountName}`;
 
-      return { label, value } satisfies MetricCalculationInput;
+      return { label, value, code: row.code ?? null } satisfies MetricCalculationInput;
     })
     .filter((item): item is MetricCalculationInput => item !== null);
 }
@@ -813,7 +816,8 @@ function getNetMetricBreakdown(context: MetricContext, periodKey: string, names:
 
       return {
         label,
-        value: isNegativeNetRow(row) ? -Math.abs(value) : value
+        value: isNegativeNetRow(row) ? -Math.abs(value) : value,
+        code: row.code ?? null
       } satisfies MetricCalculationInput;
     })
     .filter((item): item is MetricCalculationInput => item !== null);
