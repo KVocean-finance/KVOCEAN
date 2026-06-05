@@ -3061,6 +3061,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
                                                       <button className="icon-button danger" type="button" aria-label={`${detail.계정명} 삭제`} onClick={() => removeValidationAccount(detail._col!)}>🗑</button>
                                                     )}
                                                   </div>
+                                                  {detail._col !== undefined && renderNameSuggestion(detail._col, validation.parsed.nameRow[detail._col] ?? detail.계정명)}
                                                 </td>
                                                 <td>{formatNumber(detail.원본값)}</td>
                                                 <td>{detail._row !== undefined && detail._col !== undefined ? <input className="mini-input" type="number" step={1} value={String(currentValue)} onChange={(event) => updateEditableValue(detail._row!, detail._col!, detail.원본값, event.target.value)} /> : <span className="muted">자동 계산</span>}</td>
