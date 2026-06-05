@@ -1534,6 +1534,19 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
     const GLOBAL_OPTS = { nearDistance: 1, highSimilarity: 0.9, maxDistance: 3 };
     const names = validation.editableNameRow;
     const sections = buildEffectiveSections(validation.parsed.catRow, names.length);
+    // 엔진이 실제로 매긴 매칭 신호를 모은다(내 자체 트리 검사와 어긋나지 않게).
+    //  - 매출액처럼 트리 leaf명은 "영업수익"이라도 영업이익 규칙의 인식된
+    //    구성요소면 엔진이 unmatched로 안 본다 → 미분류로 띄우면 안 됨.
+    const matchedCols = new Set<number>();
+    const unmatchedCols = new Set<number>();
+    for (const result of validation.allResults) {
+      if (result.parent_col !== undefined) matchedCols.add(result.parent_col);
+      for (const d of result.detail) {
+        if (d._col === undefined) continue;
+        if (d.unmatched) unmatchedCols.add(d._col);
+        else matchedCols.add(d._col);
+      }
+    }
     names.forEach((name, colIndex) => {
       const trimmed = (name ?? "").trim();
       if (!trimmed) return;
@@ -1542,8 +1555,13 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       const key = normalizeAccountName(trimmed);
       if (accountTreeNodeNames.has(key)) return; // 섹션 총계/구조노드는 계정 아님
       const section = sections[colIndex]?.trim() || "기타";
-      const matched = resolveAccountClassification(trimmed, section, accountTreeLookup, true) !== null;
-      if (matched) return; // 이미 분류됨 → 표시 불필요
+      // 엔진이 인식한 열이면 미분류 아님. 엔진이 안 다룬 열만 트리 검사로 폴백.
+      const recognized = matchedCols.has(colIndex)
+        ? true
+        : unmatchedCols.has(colIndex)
+          ? false
+          : resolveAccountClassification(trimmed, section, accountTreeLookup, true) !== null;
+      if (recognized) return; // 이미 인식됨 → 표시 불필요
       let candidates = suggestTypoCandidates(trimmed, companyVocab);
       let fromGlobal = false;
       if (candidates.length === 0) {
@@ -1557,7 +1575,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       map.set(colIndex, { candidates, isNew: candidates.length === 0, fromGlobal });
     });
     return map;
-  }, [validation.editableNameRow, validation.parsed.catRow, validation.parsed.nameRow, accountTreeLookup, accountTreeNodeNames, companyVocab, globalVocab]);
+  }, [validation.editableNameRow, validation.parsed.catRow, validation.parsed.nameRow, validation.allResults, accountTreeLookup, accountTreeNodeNames, companyVocab, globalVocab]);
 
   const selectedDataset = useMemo(
     () => savedDatasets.find((item) => item.id === selectedDatasetId) ?? null,
