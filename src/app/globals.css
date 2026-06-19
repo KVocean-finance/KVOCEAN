@@ -1003,6 +1003,22 @@ a {
   color: var(--red);
 }
 
+/* 불일치 의심 카드 — 통과 카드들 사이에서 한눈에 띄게 */
+.result-card.is-fail {
+  border-left: 3px solid var(--red);
+}
+
+/* 접힌 상태에서도 보이는 의심 사유 한 줄 */
+.result-fail-reason {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--red);
+}
+
 .overview-card {
   padding: 18px;
 }

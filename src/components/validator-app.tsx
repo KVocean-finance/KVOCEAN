@@ -3293,7 +3293,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
                               <h3>{dateLabel}</h3>
                               <p className="muted result-meta">검증 {results.length}건</p>
                             </div>
-                            <span className={`tag ${results.some((item) => !item.passed) ? "fail" : "pass"}`}>{results.some((item) => !item.passed) ? "실패 항목 포함" : "전부 통과"}</span>
+                            <span className={`tag ${results.some((item) => !item.passed) ? "fail" : "pass"}`}>{(() => { const n = results.filter((item) => !item.passed).length; return n ? `⚠️ 불일치 의심 ${n}건` : "전부 통과"; })()}</span>
                           </div>
 
                           {results.map((result, resultIndex) => {
@@ -3312,11 +3312,17 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
                               ? pasteEdits[pasteEditKey(result.parent_row, result.parent_col)]
                               : result.parent_val;
                             return (
-                              <article className={`result-card ${isOpen ? "" : "collapsed"}`} key={cardKey}>
+                              <article className={`result-card ${isOpen ? "" : "collapsed"} ${!result.passed ? "is-fail" : ""}`} key={cardKey}>
                                 <div className="result-header">
                                   <div>
                                     <div className={resultStatus.className}>{resultStatus.label}</div>
                                     <strong>{result.rule}</strong>
+                                    {!result.passed && actions[0] && (
+                                      <div className="result-fail-reason">
+                                        {actions[0].badge ? <span className="soft-badge">{actions[0].badge}</span> : null}
+                                        <span>{renderDiagnosisText(actions[0].shortText ?? actions[0].text)}</span>
+                                      </div>
+                                    )}
                                   </div>
                                   <div className="result-header-actions">
                                     <div className="muted">차이</div>
