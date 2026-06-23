@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-const CREATOR_EMAIL = "henry@kakaoventures.co.kr";
+const CREATOR_EMAIL = "ben@kakaoventures.co.kr";
 
 type UserRole = "creator" | "admin" | "manager";
 
@@ -425,7 +425,7 @@ export function AdminPanel({
                 {ROLE_LABELS[role]}
               </span>
               <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
-                {role === "creator" && "모든 기능에 접근 가능. 데이터 삭제 포함. 계정 수정 불가."}
+                {role === "creator" && "모든 기능에 접근 가능(데이터 삭제 포함). 본인 계정은 다른 관리자가 수정·삭제할 수 없음(보호됨)."}
                 {role === "admin" && "계정 추가·권한변경·삭제 가능 (제작자 계정 제외). 앱 내 모든 탭 수정 가능. 데이터 삭제는 제작자만 가능."}
                 {role === "manager" && "OCR검증, 데이터, 결과물, 4-1 결과물DB 탭 사용 가능. 1-1, 3-1, 4번 탭 및 데이터 삭제 불가."}
               </span>

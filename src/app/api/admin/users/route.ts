@@ -17,12 +17,12 @@ async function requireAdminContext() {
 async function ensureCreatorExists(adminClient: NonNullable<ReturnType<typeof createAdminClient>>) {
   const { error } = await adminClient
     .from("allowed_users")
-    .upsert({ email: CREATOR_EMAIL, display_name: "Henry", is_active: true, role: "creator" }, { onConflict: "email", ignoreDuplicates: true });
+    .upsert({ email: CREATOR_EMAIL, display_name: "Ben", is_active: true, role: "creator" }, { onConflict: "email", ignoreDuplicates: true });
 
   if (error) {
     await adminClient
       .from("allowed_users")
-      .upsert({ email: CREATOR_EMAIL, display_name: "Henry", is_active: true }, { onConflict: "email", ignoreDuplicates: true });
+      .upsert({ email: CREATOR_EMAIL, display_name: "Ben", is_active: true }, { onConflict: "email", ignoreDuplicates: true });
   }
 }
 
