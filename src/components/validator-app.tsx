@@ -927,6 +927,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   const canSyncSheets = canEditConfig;
   const [topView, setTopView] = useState<TopViewKey>("menu");
   const [activeTab, setActiveTab] = useState<TabKey>("validate");
+  const [excelExporting, setExcelExporting] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [workspaceMemo, setWorkspaceMemo] = useState("");
   const [workspaceMemoMeta, setWorkspaceMemoMeta] = useState<{ updatedAt: string | null; updatedBy: string | null }>({ updatedAt: null, updatedBy: null });
@@ -2094,6 +2095,74 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
 
   function hasMetricRatio(row: FinalMetricRow, periodKey: string) {
     return row.ratios[periodKey] !== null && row.ratios[periodKey] !== undefined;
+  }
+
+  // 지금 보고 있는 회사·분기 결과물을 양식 .xlsx로 내보낸다(세로 A4 1페이지, 금액 1원 단위).
+  // 섹션을 좌/우 2단으로 균형 분배해 한 장에 들어가게 한다. 값 포맷은 화면과 동일.
+  async function exportReportExcel() {
+    if (!selectedReportPeriod || !resultReporting.finalSections.length || excelExporting) return;
+    const key = selectedReportPeriod.key;
+    const company = resultReporting.companyName ?? resultReporting.detectedCompany ?? "회사";
+    const industry = getCompanyIndustry(company) || "";
+
+    const blocks = resultReporting.finalSections.map((section) => {
+      const ratioOnly = isRatioOnlySection(section.title);
+      const lines = section.rows.map((row) => {
+        const turnover = isTurnoverMetricLabel(row.label);
+        const period = isPeriodMetricLabel(row.label);
+        const amountVal = row.amounts[key];
+        const ratioVal = row.ratios[key];
+        const growthVal = row.growthRates[key];
+
+        const showAmount = (!ratioOnly && !turnover) || period;
+        const showRatio = (ratioOnly || turnover || (ratioVal !== null && ratioVal !== undefined)) && !period;
+
+        const amount = showAmount
+          ? (period
+              ? { text: formatMetricValue(row, amountVal) }
+              : (amountVal !== null && amountVal !== undefined ? { num: amountVal } : {}))
+          : {};
+        const ratio = showRatio ? { text: formatMetricRatio(ratioVal, row.label) } : {};
+        const growth = (growthVal !== null && growthVal !== undefined) ? { text: `${growthVal.toFixed(1)}%` } : { text: "-" };
+        return { label: row.label, amount, ratio, growth };
+      });
+      return { title: section.title, lines };
+    });
+
+    // 좌/우 2단 균형 분배 (행 수 기준)
+    const left: typeof blocks = [];
+    const right: typeof blocks = [];
+    let lc = 0;
+    let rc = 0;
+    for (const b of blocks) {
+      const rowsCount = b.lines.length + 2;
+      if (lc <= rc) { left.push(b); lc += rowsCount; } else { right.push(b); rc += rowsCount; }
+    }
+
+    setExcelExporting(true);
+    try {
+      const { buildReportWorkbook } = await import("@/lib/report-excel");
+      const buf = await buildReportWorkbook({
+        company,
+        industry,
+        periodLabel: selectedReportPeriod.label,
+        leftBlocks: left,
+        rightBlocks: right
+      });
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${company}_${selectedReportPeriod.label}_결과물.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      window.alert(`엑셀 생성 실패: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setExcelExporting(false);
+    }
   }
 
   function loadDatasetIntoValidator(dataset: SavedQuarterSnapshot) {
@@ -3843,6 +3912,9 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
                         <p className="result-meta">엑셀 최종결과물처럼 지표 블록을 위에서 아래로 이어서 보여줍니다.</p>
                       </div>
                       <div className="inline-actions">
+                        <button className="button" onClick={exportReportExcel} disabled={excelExporting || !selectedReportPeriod} title="지금 보고 있는 회사·분기를 세로 A4 1페이지 양식 엑셀로 내보내기">
+                          {excelExporting ? "엑셀 생성 중..." : "엑셀 내보내기"}
+                        </button>
                         <button className="ghost-button" onClick={() => setShowReportValidation((prev) => !prev)}>
                           {showReportValidation ? "계산 검증 숨기기" : "계산 검증 보기"}
                         </button>
