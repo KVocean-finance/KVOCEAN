@@ -26,7 +26,7 @@ import {
 import { suggestTypoCandidates, type TypoCandidate, type VocabEntry } from "@/lib/validation/name-suggest";
 import { type SharedStateResponse } from "@/lib/shared-state";
 import { AccountTreeMirror } from "@/components/account-tree-mirror";
-import { HenryFishingLoader, HenryFishingHero, HenryLoadingDots } from "@/components/henry-fishing-loader";
+import { HenryFishingHero } from "@/components/henry-fishing-loader";
 import { DEFAULT_FAMILY_COMPANIES, computeFamilyCoverage } from "@/lib/family-companies";
 import { buildTreeCatalogLookupFromRows, buildTreeKeywordCodeSets, buildTreeKeywordPrefixes } from "@/lib/validation/account-tree-adapter";
 import { parseAccountTree, normalizeAccountName, type AccountTreeRow } from "@/lib/validation/account-tree";
@@ -2991,10 +2991,9 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   if (!mounted || !sharedStateReady || !treeBootDone) {
     return (
       <main className="workspace-shell" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "60vh" }}>
-        <div style={{ textAlign: "center", maxWidth: 560, padding: 24 }}>
+        <div style={{ textAlign: "center", maxWidth: 480, padding: 24 }}>
           <span className="hero-eyebrow">KVOCEAN OCR Validator</span>
-          <HenryFishingLoader />
-          <h1 style={{ marginTop: 12, marginBottom: 12 }}>앙리가 데이터 가져오는 <span style={{ whiteSpace: "nowrap" }}>중<HenryLoadingDots /></span></h1>
+          <h1 style={{ marginTop: 8, marginBottom: 16 }}>데이터를 가져오는 중...</h1>
           <p className="muted">
             {sharedStateError
               ? sharedStateError
