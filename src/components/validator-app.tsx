@@ -1407,8 +1407,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
   const treeSourceData = useMemo(() => {
     const sourcesByCode = new Map<string, AccountSource[]>();
     const unclassified: Array<{ l1: string; l2: string; accountName: string; sources: AccountSource[] }> = [];
-    const pendingRows: Array<{ l1: string; l2: string; accountName: string; source: string }> = [];
-    if (!accountTreeLookup) return { sourcesByCode, unclassified, pendingRows };
+    if (!accountTreeLookup) return { sourcesByCode, unclassified };
 
     // 한 번 순회: 계정명 → 출처(회사·분기) + 섹션 등장수
     const sectionNames = new Set<string>();
@@ -1435,7 +1434,6 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       }
       sourcesByCode.set(code, list);
     };
-    const yymm = (label: string) => { const m = /^(\d{4})-(\d{2})/.exec((label ?? "").trim()); return m ? `${m[1].slice(2)}${m[2]}` : (label ?? "").trim(); };
 
     for (const e of agg.values()) {
       const key = normalizeAccountName(e.accountName);
@@ -1460,19 +1458,16 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
         continue;
       }
       if (accountTreeNodeNames.has(key) || sectionNames.has(key)) continue; // 구조노드/섹션 총계
-      // 미분류 — 뷰용 + 시트 append용 행(가지 매핑)
+      // 미분류 — 뷰용 행(대/중분류 가지 추정)
       const topSec = [...e.sections.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
       const branch = structToBranch.get(topSec)
         ?? (SECTION_BRANCH_ALIASES[topSec] ? structToBranch.get(SECTION_BRANCH_ALIASES[topSec]) : undefined);
       const l1 = branch?.l1 ?? "미분류";
       const l2 = branch?.l2 ?? "";
       unclassified.push({ l1, l2, accountName: e.accountName, sources: e.sources });
-      const source = e.sources.slice(0, 20).map((s) => `${s.companyName} ${yymm(s.quarterLabel)}`).join(", ");
-      pendingRows.push({ l1, l2, accountName: e.accountName, source });
     }
     unclassified.sort((a, b) => b.sources.length - a.sources.length);
-    pendingRows.sort((a, b) => a.accountName.localeCompare(b.accountName));
-    return { sourcesByCode, unclassified, pendingRows };
+    return { sourcesByCode, unclassified };
   }, [savedDatasets, accountTreeLookup, accountTreeNodeNames, structToBranch]);
 
   // 출처(회사·분기) 클릭 → 그 데이터셋을 OCR검증 탭에 로드(미분류 계정 직접 수정용).
@@ -4156,7 +4151,7 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
               </section>
 
               <section className="config-card">
-                <AccountTreeMirror sourcesByCode={treeSourceData.sourcesByCode} unclassified={treeSourceData.unclassified} pendingRows={treeSourceData.pendingRows} onOpenSource={openSourceInValidator} onDeleteUnclassified={deleteUnclassifiedAccount} />
+                <AccountTreeMirror sourcesByCode={treeSourceData.sourcesByCode} unclassified={treeSourceData.unclassified} onOpenSource={openSourceInValidator} onDeleteUnclassified={deleteUnclassifiedAccount} />
               </section>
             </>
           )}
