@@ -2129,15 +2129,15 @@ export function ValidatorApp({ userRole = "manager", initialDatasets, initialTra
       return { title: section.title, lines };
     });
 
-    // 좌/우 2단 균형 분배 (행 수 기준)
-    const left: typeof blocks = [];
-    const right: typeof blocks = [];
-    let lc = 0;
-    let rc = 0;
-    for (const b of blocks) {
-      const rowsCount = b.lines.length + 2;
-      if (lc <= rc) { left.push(b); lc += rowsCount; } else { right.push(b); rc += rowsCount; }
-    }
+    // 좌/우 2단 고정 배치: 왼=핵심·자산부채·비용, 오=비율 4종.
+    const LEFT_ORDER = ["핵심 지표", "자산/부채 분석", "비용 구조 분석"];
+    const RIGHT_ORDER = ["안정성 비율", "수익성 비율", "활동성 비율", "성장성 비율"];
+    const byTitle = new Map(blocks.map((b) => [b.title, b]));
+    const left = LEFT_ORDER.flatMap((tt) => { const b = byTitle.get(tt); return b ? [b] : []; });
+    const right = RIGHT_ORDER.flatMap((tt) => { const b = byTitle.get(tt); return b ? [b] : []; });
+    // 위 목록에 없는 섹션이 생기면 왼쪽 끝에 덧붙인다(누락 방지).
+    const placed = new Set([...LEFT_ORDER, ...RIGHT_ORDER]);
+    for (const b of blocks) if (!placed.has(b.title)) left.push(b);
 
     setExcelExporting(true);
     try {
