@@ -865,6 +865,14 @@ function getMetricValue(context: MetricContext, periodKey: string, names: string
   return firstAvailableValue(context.adjustedRows, periodKey, names, undefined);
 }
 
+// 영업이익은 단일 손익 소계 라인이라 절대 합산하면 안 된다. OCR이 요약 손익
+// 블록과 상세 손익 블록을 둘 다 읽어 영업이익이 두 번(손익계산서 + 기타)
+// 잡히는 데이터가 많아(2026-06 기준 684개 중 79개), 합산하면 2배가 된다.
+// 손익계산서 섹션을 우선하는 단일값으로 가져온다(EBITDA·월평균지출과 동일 방식).
+function getOperatingIncome(context: MetricContext, periodKey: string) {
+  return getMetricValue(context, periodKey, ["영업이익", "영업이익(손실)"]);
+}
+
 function getMetricSum(context: MetricContext, periodKey: string, names: string[]) {
   return sumValues(context.adjustedRows, periodKey, names, undefined);
 }
@@ -1518,9 +1526,9 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
     },
     {
       label: "이자보상비율",
-      ratio: (period, current) => safeDivide(getAdjustedMetricSum(current, period.key, ["영업이익", "영업이익(손실)"]), getClassifiedMetricSum(current, period.key, ["이자비용"]), 100),
+      ratio: (period, current) => safeDivide(getOperatingIncome(current, period.key), getClassifiedMetricSum(current, period.key, ["이자비용"]), 100),
       ratioDetail: (period, current, result) => {
-        const operatingIncome = getAdjustedMetricSum(current, period.key, ["영업이익", "영업이익(손실)"]);
+        const operatingIncome = getOperatingIncome(current, period.key);
         const interestExpense = getClassifiedMetricSum(current, period.key, ["이자비용"]);
         return createCalculationDetail("영업이익 / 이자비용 * 100", result, [
           { label: "영업이익", value: operatingIncome },
@@ -1569,9 +1577,9 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
     },
     {
       label: "영업이익률",
-      ratio: (period, current) => safeDivide(getAdjustedMetricSum(current, period.key, ["영업이익", "영업이익(손실)"]), getPreferredAdjustedMetric(current, period.key, ["매출액"]), 100),
+      ratio: (period, current) => safeDivide(getOperatingIncome(current, period.key), getPreferredAdjustedMetric(current, period.key, ["매출액"]), 100),
       ratioDetail: (period, current, result) => {
-        const operatingIncome = getAdjustedMetricSum(current, period.key, ["영업이익", "영업이익(손실)"]);
+        const operatingIncome = getOperatingIncome(current, period.key);
         const sales = getPreferredAdjustedMetric(current, period.key, ["매출액"]);
         return createCalculationDetail("영업이익 / 매출액 * 100", result, [
           { label: "영업이익", value: operatingIncome },
@@ -1818,16 +1826,16 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         if (!previous) {
           return null;
         }
-        const currentOperating = getAdjustedMetricSum(current, period.key, ["영업이익", "영업이익(손실)"]);
-        const previousOperating = getAdjustedMetricSum(current, previous.key, ["영업이익", "영업이익(손실)"]);
+        const currentOperating = getOperatingIncome(current, period.key);
+        const previousOperating = getOperatingIncome(current, previous.key);
         return currentOperating !== null && previousOperating !== null && previousOperating !== 0
           ? ((currentOperating - previousOperating) / previousOperating) * 100
           : null;
       },
       ratioDetail: (period, current, result) => {
         const previous = getPreviousPeriod(current, period);
-        const currentOperating = getAdjustedMetricSum(current, period.key, ["영업이익", "영업이익(손실)"]);
-        const previousOperating = previous ? getAdjustedMetricSum(current, previous.key, ["영업이익", "영업이익(손실)"]) : null;
+        const currentOperating = getOperatingIncome(current, period.key);
+        const previousOperating = previous ? getOperatingIncome(current, previous.key) : null;
         return createCalculationDetail("(당기 영업이익 - 직전 분기 영업이익) / |직전 분기 영업이익| * 100", result, [
           { label: "당기 영업이익", value: currentOperating },
           { label: previous ? `직전 분기 영업이익 (${previous.label})` : "직전 분기 영업이익", value: previousOperating }
@@ -1841,16 +1849,16 @@ function buildFinalSections(context: MetricContext): FinalMetricSection[] {
         if (!previousYearSameQuarter) {
           return null;
         }
-        const currentOperating = getAdjustedMetricSum(current, period.key, ["영업이익", "영업이익(손실)"]);
-        const previousYearOperating = getAdjustedMetricSum(current, previousYearSameQuarter.key, ["영업이익", "영업이익(손실)"]);
+        const currentOperating = getOperatingIncome(current, period.key);
+        const previousYearOperating = getOperatingIncome(current, previousYearSameQuarter.key);
         return currentOperating !== null && previousYearOperating !== null && previousYearOperating !== 0
           ? ((currentOperating - previousYearOperating) / Math.abs(previousYearOperating)) * 100
           : null;
       },
       ratioDetail: (period, current, result) => {
         const previousYearSameQuarter = getPreviousYearSameQuarterPeriod(current, period);
-        const currentOperating = getAdjustedMetricSum(current, period.key, ["영업이익", "영업이익(손실)"]);
-        const previousYearOperating = previousYearSameQuarter ? getAdjustedMetricSum(current, previousYearSameQuarter.key, ["영업이익", "영업이익(손실)"]) : null;
+        const currentOperating = getOperatingIncome(current, period.key);
+        const previousYearOperating = previousYearSameQuarter ? getOperatingIncome(current, previousYearSameQuarter.key) : null;
         return createCalculationDetail("(당기 영업이익 - 전년도 동일분기 영업이익) / |전년도 동일분기 영업이익| * 100", result, [
           { label: "당기 영업이익", value: currentOperating },
           { label: previousYearSameQuarter ? `전년도 동일분기 영업이익 (${previousYearSameQuarter.label})` : "전년도 동일분기 영업이익", value: previousYearOperating }
